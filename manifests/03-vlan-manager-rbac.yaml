@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vlan-manager-sa
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vlan-manager-clusterrole
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["impersonate"]  
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vlan-manager-clusterrolebinding
+subjects:
+- kind: ServiceAccount
+  name: vlan-manager-sa
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: vlan-manager-clusterrole
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vlan-manager-pod-access
+  namespace: kube-system
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: kube-system
+  name: vlan-manager-role
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "persistentvolumeclaims", "pods", "endpoints", "nodes"]
+  verbs: ["get", "list", "create", "update", "delete", "patch", "watch"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "create", "update", "delete", "patch", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vlan-manager-pod-access-binding
+  namespace: kube-system
+subjects:
+- kind: ServiceAccount
+  name: vlan-manager-sa
+  namespace: kube-system
+roleRef:
+  kind: Role
+  name: vlan-manager-pod-access
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vlan-manager-rolebinding
+  namespace: kube-system
+subjects:
+- kind: ServiceAccount
+  name: vlan-manager-sa
+  namespace: kube-system
+roleRef:
+  kind: Role
+  name: vlan-manager-role
+  apiGroup: rbac.authorization.k8s.io
