@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vlan-leader-manager
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vlan-leader-manager
+  template:
+    metadata:
+      labels:
+        app: vlan-leader-manager
+    spec:
+      serviceAccountName: vlan-manager-sa
+      containers:
+        - name: vlan-leader-manager
+          image: python:3.9
+          command: ["/bin/bash", "-c"]
+          args: 
+            - |
+              apt-get update && \
+              apt-get install -y jq apt-transport-https ca-certificates curl net-tools && \
+              curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add - && \
+              curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
+              chmod +x kubectl && \
+              mv kubectl /usr/local/bin/kubectl && \
+              pip install --upgrade pip && \
+              pip install linode-cli && \
+              mkdir -p /root/.linode-cli && \
+              cp /mnt/linode-cli/* /root/.linode-cli/ && \
+              chmod 600 /root/.linode-cli/* && \
+              pip install flask flask-cors && \
+              cp --dereference /root/scripts/06-rest-api.py /tmp/06-rest-api.py && \
+              chmod u+x /tmp/06-rest-api.py  && \
+              cp --dereference /root/scripts/01-script-leader-election.sh /tmp/01-script-leader-election.sh && \
+              chmod u+x /tmp/01-script-leader-election.sh && \
+              /tmp/01-script-leader-election.sh
+          volumeMounts:
+            - name: vlan-manager-scripts
+              mountPath: /root/scripts
+            - name: vlan-ip-storage
+              mountPath: /mnt/vlan-ip
+            - name: linode-cli-config
+              mountPath: /mnt/linode-cli
+          env:
+            - name: SUBNET
+              value: "172.16.0.0/12"
+            - name: VLAN_LABEL
+              value: "Linode-AWS"
+            - name: KUBECONFIG
+              value: "/root/.kube/config"
+            - name: POD_NAME   
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+      volumes:
+        - name: vlan-manager-scripts
+          configMap:
+            name: vlan-manager-scripts
+        - name: vlan-ip-storage
+          persistentVolumeClaim:
+            claimName: vlan-ip-pvc
+        - name: linode-cli-config
+          configMap:
+            name: linode-cli-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vlan-leader-service
+  namespace: kube-system
+spec:
+  selector:
+    app: vlan-leader-manager
+  ports:
+    - protocol: TCP
+      port: 8080        # Expose port 8080
+      targetPort: 8080  # Target port inside the container
+  type: ClusterIP       # Internal communication within the cluster

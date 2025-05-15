@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vlan-ip-initializer
+  namespace: kube-system
+spec:
+  ttlSecondsAfterFinished: 60
+  template:
+    metadata:
+      name: vlan-ip-initializer
+    spec:
+      containers:
+      - name: vlan-ip-initializer
+        image: ubuntu:latest
+        command: ["/bin/bash", "-c"]
+        args: ["
+          mkdir -p /mnt/vlan-ip && \
+          cp /root/scripts/05-script-ip-list-initialize.sh /mnt/vlan-ip/ && \
+          chmod +x /mnt/vlan-ip/05-script-ip-list-initialize.sh && \
+          echo 'Sleeping for 60 seconds before running initialization script...' && \
+          /mnt/vlan-ip/05-script-ip-list-initialize.sh $SUBNET
+        "]
+        env:
+        - name: SUBNET
+          value: "172.16.0.0/12"    
+        volumeMounts:
+        - name: vlan-ip-pv
+          mountPath: /mnt/vlan-ip
+        - name: vlan-manager-scripts
+          mountPath: /root/scripts
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/bash", "-c", "echo 'PostStart Hook Executed. Volume Mounted.'"]
+          preStop:
+            exec:
+              command: ["/bin/bash", "-c", "umount /mnt/vlan-ip && echo 'Volume Unmounted successfully.'"]
+        securityContext:
+          privileged: true
+          runAsUser: 0
+          runAsGroup: 0          
+      restartPolicy: Never
+      volumes:
+      - name: vlan-ip-pv
+        persistentVolumeClaim:
+          claimName: vlan-ip-pvc
+      - name: vlan-manager-scripts
+        configMap:
+          name: vlan-manager-scripts
+  backoffLimit: 3

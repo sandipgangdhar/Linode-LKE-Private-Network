@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vlan-manager
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: vlan-manager
+  template:
+    metadata:
+      labels:
+        app: vlan-manager
+    spec:
+      hostNetwork: true  # <-- This allows the Pod to share the worker node's network namespace
+      dnsPolicy: ClusterFirstWithHostNet  # Use the node's DNS for resolution
+      serviceAccountName: vlan-manager-sa
+      containers:
+        - name: vlan-manager
+          image: python:3.9
+          command: ["/bin/bash", "-c"]
+          args: 
+            - |
+              apt-get update && \
+              apt-get install -y jq apt-transport-https ca-certificates curl net-tools iproute2 && \
+              curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add - && \
+              curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
+              chmod +x kubectl && \
+              mv kubectl /usr/local/bin/kubectl && \
+              pip install --upgrade pip && \
+              pip install linode-cli && \
+              mkdir -p /root/.linode-cli && \
+              cp /mnt/linode-cli/* /root/.linode-cli/ && \
+              chmod 600 /root/.linode-cli/* && \
+              export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
+              cp --dereference /root/scripts/02-script-vlan-attach.sh /tmp/02-script-vlan-attach.sh && \
+              chmod u+x /tmp/02-script-vlan-attach.sh && \
+              cp --dereference /root/scripts/03-script-ip-allocate.sh /tmp/03-script-ip-allocate.sh && \
+              chmod u+x /tmp/03-script-ip-allocate.sh && \
+              cp --dereference /root/scripts/02-script-vlan-attach.sh /tmp/02-script-vlan-attach.sh && \
+              chmod u+x /tmp/02-script-vlan-attach.sh && \
+              cat <<EOF > /tmp/kubeconfig
+              apiVersion: v1
+              kind: Config
+              clusters:
+              - cluster:
+                  certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                  server: https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT_HTTPS
+                name: in-cluster
+              contexts:
+              - context:
+                  cluster: in-cluster
+                  user: in-cluster
+                name: in-cluster
+              current-context: in-cluster
+              users:
+              - name: in-cluster
+                user:
+                  token: $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              EOF
+              export KUBECONFIG=/tmp/kubeconfig
+              sleep 360000 && \
+              /tmp/02-script-vlan-attach.sh
+          volumeMounts:
+            - name: vlan-manager-scripts
+              mountPath: /root/scripts
+            - name: linode-cli-config
+              mountPath: /mnt/linode-cli
+          env:
+            - name: SUBNET
+              value: "192.168.0.0/12"
+            - name: VLAN_LABEL
+              value: "vlan-1"
+            - name: KUBECONFIG
+              value: "/tmp/kubeconfig"    # Updated this path
+
+      volumes:
+        - name: vlan-manager-scripts
+          configMap:
+            name: vlan-manager-scripts
+        - name: linode-cli-config
+          configMap:
+            name: linode-cli-config
