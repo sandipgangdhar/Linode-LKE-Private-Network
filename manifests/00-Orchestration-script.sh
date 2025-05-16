@@ -8,25 +8,31 @@ set -e
 # === Cleanup Function on Failure ===
 cleanup() {
     echo "❌ Deployment failed. Performing cleanup..."
+    
     echo "🧹 Cleaning up Initializer Job..."
-kubectl delete job vlan-ip-initializer --ignore-not-found && echo "✅ Initializer Job deleted."
+    kubectl delete job vlan-ip-initializer -n kube-system --ignore-not-found && echo "✅ Initializer Job deleted."
+    
     echo "🧹 Cleaning up VLAN Leader Manager Deployment..."
-kubectl delete deployment vlan-leader-manager -n kube-system --ignore-not-found && echo "✅ VLAN Leader Manager Deployment deleted."
+    kubectl delete deployment vlan-leader-manager -n kube-system --ignore-not-found && echo "✅ VLAN Leader Manager Deployment deleted."
+    
     echo "🧹 Cleaning up VLAN Manager DaemonSet..."
-kubectl delete daemonset vlan-manager -n kube-system --ignore-not-found && echo "✅ VLAN Manager DaemonSet deleted."
+    kubectl delete daemonset vlan-manager -n kube-system --ignore-not-found && echo "✅ VLAN Manager DaemonSet deleted."
+    
     echo "🧹 Cleaning up PersistentVolumeClaim..."
-kubectl delete pvc vlan-ip-pvc --ignore-not-found && echo "✅ PersistentVolumeClaim deleted."
+    kubectl delete pvc vlan-ip-pvc -n kube-system --ignore-not-found && echo "✅ PersistentVolumeClaim deleted."
+    
     echo "🧹 Cleaning up ConfigMaps..."
-kubectl delete configmap vlan-manager-scripts --ignore-not-found && echo "✅ vlan-manager-scripts ConfigMap deleted."
-    kubectl delete configmap linode-cli-config --ignore-not-found && echo "✅ linode-cli-config ConfigMap deleted."
+    kubectl delete configmap vlan-manager-scripts -n kube-system --ignore-not-found && echo "✅ vlan-manager-scripts ConfigMap deleted."
+    kubectl delete configmap linode-cli-config -n kube-system --ignore-not-found && echo "✅ linode-cli-config ConfigMap deleted."
+    kubectl delete configmap vlan-manager-config -n kube-system --ignore-not-found && echo "✅ vlan-manager-config ConfigMap deleted."
+    
     echo "✅ Cleanup complete."
 }
 
 trap cleanup EXIT
 
-# === Step 1: Delete existing StorageClass ===
+# === Step 1: Apply StorageClass ===
 echo "🔄 Checking for existing Linode Block StorageClass..."
-
 if kubectl get storageclass linode-block-storage &> /dev/null; then
     echo "✅ linode-block-storage already exists. Skipping creation."
 else
@@ -43,9 +49,12 @@ kubectl apply -f 02-vlan-ip-pvc.yaml || exit 1
 echo "✅ Applying RBAC for VLAN Manager..."
 kubectl apply -f 03-vlan-manager-rbac.yaml || exit 1
 
-# === Step 4: Apply ConfigMap for VLAN Manager Scripts ===
+# === Step 4: Apply ConfigMaps ===
 echo "✅ Applying ConfigMap for VLAN Manager Scripts..."
 kubectl apply -f 04-vlan-manager-scripts-configmap.yaml || exit 1
+
+echo "✅ Applying ConfigMap for VLAN Manager Configuration..."
+kubectl apply -f 00-vlan-manager-configmap.yaml || exit 1
 
 # === Step 5: Apply Initializer Job ===
 echo "🚀 Launching VLAN IP Initializer Job..."
@@ -53,44 +62,32 @@ kubectl apply -f 05-vlan-ip-initializer-job.yaml || exit 1
 
 # Wait for Job to appear in Kubernetes
 echo "⏳ Waiting for Initializer Job to be registered in Kubernetes..."
-MAX_RETRIES=10
-RETRY_COUNT=0
-while ! kubectl get job vlan-ip-initializer -n kube-system &>/dev/null; do
-    RETRY_COUNT=$((RETRY_COUNT + 1))
-    if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
-        echo "❌ Initializer Job not found after $MAX_RETRIES attempts. Exiting..."
-        exit 1
+for i in {1..10}; do
+    if kubectl get job vlan-ip-initializer -n kube-system &>/dev/null; then
+        echo "✅ Initializer Job found."
+        break
     fi
-    echo "🔄 Job not found yet. Retrying in 5 seconds... ($RETRY_COUNT/$MAX_RETRIES)"
-    sleep 6
+    echo "🔄 Job not found yet. Retrying in 5 seconds... ($i/10)"
+    sleep 5
 done
 
 # Wait for Job to complete
 echo "⏳ Waiting for Initializer Job to complete..."
-echo "⏳ Waiting for Initializer Job to complete..."
 kubectl wait --for=condition=complete --timeout=600s job/vlan-ip-initializer -n kube-system
 
-# Wait for PV to be available
-echo "⏳ Waiting for PersistentVolume to become available..."
-RETRIES=0
-while [ $RETRIES -lt 20 ]; do
-    PV_STATUS=$(kubectl get pv | grep vlan-ip-pvc | awk '{print $5}')
-    if [ "$PV_STATUS" == "Available" ]; then
-        echo "✅ PersistentVolume is now available."
+# Wait for PVC to be detached
+echo "⏳ Waiting for PersistentVolumeClaim to be available..."
+for i in {1..20}; do
+    PVC_STATUS=$(kubectl describe pvc vlan-ip-pvc -n kube-system | grep "Used By:" | awk '{print $3}')
+    
+    if [ "$PVC_STATUS" == "<none>" ]; then
+        echo "✅ PersistentVolumeClaim is now available for use."
         break
+    else
+        echo "🔄 PVC still attached to $PVC_STATUS... retrying ($i/20)"
+        sleep 10
     fi
-    echo "🔄 Waiting for PV to be released... ($RETRIES/20)"
-    RETRIES=$((RETRIES + 1))
-    sleep 10
 done
-
-if [ $RETRIES -eq 20 ]; then
-    echo "❌ PersistentVolume did not become available. Exiting..."
-    exit 1
-fi
- || exit 1
-
-echo "✅ VLAN IP Initializer Job completed."
 
 # === Step 6: Deploy Leader Manager Deployment ===
 echo "🚀 Deploying VLAN Leader Manager..."
@@ -103,24 +100,23 @@ kubectl rollout status deployment/vlan-leader-manager -n kube-system
 # === Check if port 8080 is open and healthy ===
 echo "🔎 Checking if port 8080 is available on vlan-leader-manager..."
 LEADER_POD=$(kubectl get pods -n kube-system -l app=vlan-leader-manager -o jsonpath='{.items[0].metadata.name}')
-MAX_RETRIES=10
-COUNT=0
-while [ $COUNT -lt $MAX_RETRIES ]; do
+
+for i in {1..10}; do
     if kubectl exec -n kube-system $LEADER_POD -- curl -s http://localhost:8080/health &> /dev/null; then
         echo "✅ VLAN Leader Manager is healthy and responding."
         break
     else
-        echo "🔄 Waiting for VLAN Leader Manager to become healthy... ($COUNT/$MAX_RETRIES)"
+        echo "🔄 Waiting for VLAN Leader Manager to become healthy... ($i/10)"
         sleep 6
     fi
-    COUNT=$((COUNT + 1))
 done
 
-if [ $COUNT -eq $MAX_RETRIES ]; then
-    echo "❌ VLAN Leader Manager failed to become healthy. Exiting..."
+if [ $i -eq 10 ]; then
+    echo "❌ VLAN Leader Manager failed to become healthy. Capturing logs..."
+    kubectl logs -n kube-system $LEADER_POD > vlan-leader-manager-logs.txt
+    echo "💡 Logs saved to vlan-leader-manager-logs.txt"
     exit 1
 fi
- || exit 1
 
 echo "✅ VLAN Leader Manager is up and running."
 
@@ -128,7 +124,7 @@ echo "✅ VLAN Leader Manager is up and running."
 echo "🚀 Deploying VLAN Manager DaemonSet..."
 kubectl apply -f 07-vlan-manager-daemonset.yaml || exit 1
 
-# Wait for DaemonSet pods to be ready
+# Wait for DaemonSet rollout
 echo "⏳ Waiting for VLAN Manager DaemonSet to be ready..."
 kubectl rollout status daemonset/vlan-manager -n kube-system
 
@@ -146,9 +142,6 @@ echo "🔍 You can monitor the logs using the following commands:"
 for pod in $PODS; do
     echo "kubectl logs -f pod/$pod -n kube-system"
 done
- || exit 1
-
-echo "✅ VLAN Manager DaemonSet is fully deployed."
 
 echo "🎉 Orchestration Complete! VLAN Manager is fully operational."
 

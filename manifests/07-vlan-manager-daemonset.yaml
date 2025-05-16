@@ -70,7 +70,7 @@ spec:
 
               # === Configure Linode CLI ===
               mkdir -p /root/.linode-cli && \
-              cp /mnt/linode-cli/* /root/.linode-cli/ && \
+              echo "$LINODE_CLI_CONFIG" > /root/.linode-cli/linode-cli && \
               chmod 600 /root/.linode-cli/* && \
               export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli" && \
               echo "✅ Linode CLI configuration completed."
@@ -112,36 +112,42 @@ spec:
               /tmp/02-script-vlan-attach.sh
               echo "🛌 Script execution complete. Sleeping indefinitely..."
               sleep infinity
-
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
-              memory: "512Mi"
-              cpu: "250m"
-
           env:
             - name: SUBNET
-              value: "10.180.0.0/24"
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: SUBNET
             - name: VLAN_LABEL
-              value: "private-lan"
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: VLAN_LABEL
             - name: KUBECONFIG
-              value: "/tmp/kubeconfig"
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: KUBECONFIG
             - name: ROUTE_IP
-              value: "10.180.0.2"    
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: ROUTE_IP
             - name: DEST_SUBNET
-              value: "10.180.2.0/24"
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: DEST_SUBNET
+            - name: LINODE_CLI_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: LINODE_CLI_CONFIG
           volumeMounts:
             - name: vlan-manager-scripts
               mountPath: /root/scripts
-            - name: linode-cli-config
-              mountPath: /mnt/linode-cli
 
       volumes:
         - name: vlan-manager-scripts
           configMap:
             name: vlan-manager-scripts
-        - name: linode-cli-config
-          configMap:
-            name: linode-cli-config

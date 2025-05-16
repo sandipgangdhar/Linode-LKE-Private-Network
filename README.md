@@ -1,97 +1,108 @@
-# Linode-LKE-Private-Network
+# Linode LKE VLAN Manager Solution
 
-This repository provides an automated solution for setting up a private VLAN-based networking environment on a Linode Kubernetes Engine (LKE) cluster. It facilitates seamless private IP allocation, VLAN attachment, and route management between Linode and AWS or other private subnets.
+## Overview
 
-## Features:
+This solution enables **private networking** for Linode Kubernetes Engine (LKE) clusters using **VLANs** and a **Site-to-Site IPsec VPN**. By integrating VLAN support directly with LKE, workloads can securely communicate with other Linode resources and even external cloud environments like AWS — without traversing the public internet.
 
-* **VLAN Attachment:** Automatically attaches VLAN interfaces to LKE worker nodes.
-* **Private IP Allocation:** Manages private IP allocation using a leader election mechanism for synchronization.
-* **Route Management:** Pushes custom routes to worker nodes upon VLAN attachment.
-* **High Availability:** Leader election mechanism ensures failover and consistency in IP allocation.
+### 🔍 **Problem Statement**
 
-## Architecture:
+By default, LKE clusters cannot be launched inside VPCs or VLANs on Linode. This meant that any internal communication between LKE pods and other Linode resources had to go over the public internet, which:
 
-1. **Storage Class & PVC** - Creates the necessary storage class and persistent volume claim for storing IP addresses.
-2. **RBAC Policies** - Ensures appropriate permissions for the pods to perform network operations.
-3. **ConfigMaps & Scripts** - Deploys necessary scripts and configurations.
-4. **VLAN Initializer Job** - Initializes the IP list and reserved IPs for VLAN.
-5. **Leader Manager Deployment** - Manages leader election and IP allocation.
-6. **VLAN Manager DaemonSet** - Manages VLAN attachment and route pushing to worker nodes.
+* Exposes applications to public attack surfaces.
+* Increases latency and data transfer costs.
+* Complicates compliance with data privacy standards.
 
-## Deployment Steps:
+### 🚀 **Solution Highlights**
 
-1. Apply the storage class:
+* **Private Networking:** LKE nodes are connected to a private VLAN for internal communication.
+* **Seamless Database Access:** Direct access to Linode-hosted databases without public exposure.
+* **Site-to-Site VPN:** Extends private networking to AWS or other data centers securely.
+* **Automated IP Management:** Dynamic IP allocation for VLAN-attached interfaces.
+* **Failover and Health Checks:** Resilient to network failures, with automatic recovery.
 
-   ```bash
-   kubectl apply -f 01-linode-storageclass.yaml
-   ```
+---
 
-2. Apply the PVC:
+## 📌 **Deployment Steps**
 
-   ```bash
-   kubectl apply -f 02-vlan-ip-pvc.yaml
-   ```
+1️⃣ **Clone the Repository**
 
-3. Apply RBAC policies:
+```bash
+git clone https://github.com/yourusername/linode-lke-vlan-manager.git
+cd linode-lke-vlan-manager
+```
 
-   ```bash
-   kubectl apply -f 03-vlan-manager-rbac.yaml
-   ```
+2️⃣ **Make the Orchestration Script Executable**
 
-4. Apply ConfigMaps:
+```bash
+chmod +x orchestration.sh
+```
 
-   ```bash
-   kubectl apply -f 04-vlan-manager-scripts-configmap.yaml
-   ```
+3️⃣ **Run the Orchestration Script**
 
-5. Initialize VLAN IP list:
+```bash
+./orchestration.sh
+```
 
-   ```bash
-   kubectl apply -f 05-vlan-ip-initializer-job.yaml
-   ```
+4️⃣ **Monitor the Logs**
 
-6. Deploy the Leader Manager:
+```bash
+kubectl logs -f daemonset/vlan-manager -n kube-system
+```
 
-   ```bash
-   kubectl apply -f 06-vlan-leader-manager-deployment.yaml
-   ```
+---
 
-7. Deploy the VLAN Manager DaemonSet:
+## 🖥️ **Validation Steps**
+
+1. **Check Pod Communication:**
 
    ```bash
-   kubectl apply -f 07-vlan-manager-daemonset.yaml
+   kubectl exec -it <pod-name> -- ping <private-ip>
    ```
 
-## Verification:
+2. **Check VPN Connectivity:**
 
-* **Check Leader Status:**
+   ```bash
+   ping <aws-private-ip>
+   ```
+
+3. **Monitor VPN Status:**
+
+   ```bash
+   sudo ipsec status
+   ```
+
+4. **Monitor DaemonSet Logs:**
+   The orchestration script will output the following commands:
+
+   ```bash
+   kubectl logs -f pod/vlan-manager-xxxxx -n kube-system
+   kubectl logs -f pod/vlan-manager-yyyyy -n kube-system
+   ```
+
+---
+
+## 🔄 **Troubleshooting**
+
+* If the orchestration script fails, it automatically cleans up all resources, allowing you to re-run without conflicts.
+* Check logs in the namespace:
 
   ```bash
-  kubectl get configmap vlan-manager-leader -n kube-system -o yaml
+  kubectl logs -n kube-system -l app=vlan-manager
   ```
-
-* **Verify IP Allocation:**
-
-  ```bash
-  curl -X POST http://<leader_pod_ip>:8080/allocate -H "Content-Type: application/json" -d '{}'
-  ```
-
-* **Verify VLAN Attachment:**
+* Check for VPN tunnel status:
 
   ```bash
-  linode-cli linodes config-view <LINODE_ID> <CONFIG_ID> --json | jq
-  ```
-
-* **Verify Route on Worker Node:**
-
-  ```bash
-  ip route show
+  sudo ipsec status
   ```
 
 ---
 
-## Orchestration:
+## 🤝 **Contributing**
 
-The orchestration is handled via `orchestration.sh` which automates all the steps above.
+Feel free to open issues and submit PRs for improvements or bug fixes.
 
 ---
+
+## 📄 **License**
+
+MIT License

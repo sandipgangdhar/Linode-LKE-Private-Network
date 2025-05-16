@@ -22,7 +22,10 @@ spec:
         "]
         env:
         - name: SUBNET
-          value: "10.180.0.0/24"    
+          valueFrom:
+            configMapKeyRef:
+              name: vlan-manager-config
+              key: SUBNET 
         volumeMounts:
         - name: vlan-ip-pv
           mountPath: /mnt/vlan-ip

@@ -1,47 +1,68 @@
 #!/bin/bash
+# Exit on error
+set -e
 
-# Usage: ./05-script-ip-list-initialize.sh <subnet>
-# Example: ./05-script-ip-list-initialize.sh 192.168.0.0/16
+# File paths for IP allocation
+IP_FILE_PATH="/mnt/vlan-ip/vlan-ip-list.txt"
+RESERVED_IP_FILE="/mnt/vlan-ip/reserved-ips.txt"
+SUBNET=$1
 
-if [ -z "$1" ]; then
-    echo "[ERROR] Usage: ./05-script-ip-list-initialize.sh <subnet>"
+# Logging function
+log() {
+    echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
+}
+
+# === Check if the file already has data ===
+if [ -f "$IP_FILE_PATH" ] && [ -s "$IP_FILE_PATH" ]; then
+    log "IP List file already initialized. Skipping initialization."
+    exit 0
+fi
+
+# Initialize the files if not present
+if [ ! -f "$IP_FILE_PATH" ]; then
+    log "Creating IP list file at $IP_FILE_PATH"
+    touch $IP_FILE_PATH
+fi
+
+if [ ! -f "$RESERVED_IP_FILE" ]; then
+    log "Creating Reserved IP list file at $RESERVED_IP_FILE"
+    touch $RESERVED_IP_FILE
+fi
+
+if [ -z "$SUBNET" ]; then
+    log "No subnet provided. Exiting..."
     exit 1
 fi
 
-SUBNET="$1"
-IP_LIST_FILE="/mnt/vlan-ip/vlan-ip-list.txt"
+# === Calculate IP addresses without ipcalc ===
+NETWORK_PREFIX=$(echo $SUBNET | cut -d'/' -f2)
+IFS=. read -r i1 i2 i3 i4 <<< "$(echo $SUBNET | cut -d'/' -f1)"
 
-# Check if the file already exists and has data
-if [ -f "$IP_LIST_FILE" ] && [ -s "$IP_LIST_FILE" ]; then
-    echo "[ERROR] IP list already initialized at $IP_LIST_FILE."
-    echo "[INFO] If you want to reinitialize, please delete the file manually and re-run the script."
-    exit 1
-fi
+# Network IP (x.x.x.0)
+NETWORK_IP="$i1.$i2.$i3.0/$NETWORK_PREFIX"
 
-# Extract the base IP and the prefix
-IFS='/' read -r BASE_IP PREFIX <<< "$SUBNET"
+# First usable IP (x.x.x.1)
+FIRST_IP="$i1.$i2.$i3.1/$NETWORK_PREFIX"
 
-# Initialize the file
-echo "[INFO] Initializing IP list in $IP_LIST_FILE"
-rm -f $IP_LIST_FILE
-touch $IP_LIST_FILE
+# Broadcast IP (x.x.x.255)
+BROADCAST_IP="$i1.$i2.$i3.255/$NETWORK_PREFIX"
 
-# ✅ **Write the Subnet Range as the First Line**
-echo "$SUBNET" > $IP_LIST_FILE
+# Reserved IPs Array
+RESERVED_IPS=("$NETWORK_IP" "$FIRST_IP" "$BROADCAST_IP")
 
-# Generate Reserved IPs
-IFS='.' read -r o1 o2 o3 o4 <<< "$BASE_IP"
+log "Reserved IPs for subnet $SUBNET: ${RESERVED_IPS[*]}"
 
-# First IP
-echo "$o1.$o2.$o3.$o4,RESERVED" >> $IP_LIST_FILE
-# Second IP
-echo "$o1.$o2.$o3.$((o4 + 1)),RESERVED" >> $IP_LIST_FILE
+# Adding reserved IPs to both files
+log "Adding reserved IPs to the allocation list and reserved list..."
+for ip in "${RESERVED_IPS[@]}"; do
+    if ! grep -q "^$ip$" "$IP_FILE_PATH"; then
+        echo "$ip" >> "$IP_FILE_PATH"
+        log "Reserved IP added to list: $ip"
+    fi
+    if ! grep -q "^$ip$" "$RESERVED_IP_FILE"; then
+        echo "$ip" >> "$RESERVED_IP_FILE"
+        log "Reserved IP added to reserved list: $ip"
+    fi
+done
 
-# Calculate the last IP in the subnet correctly
-python3 -c "
-import ipaddress
-net = ipaddress.IPv4Network('$SUBNET')
-print(f'{net[-1]},RESERVED')
-" >> $IP_LIST_FILE
-
-echo "[INFO] IP list initialization complete."
+log "Reserved IPs initialization completed."
