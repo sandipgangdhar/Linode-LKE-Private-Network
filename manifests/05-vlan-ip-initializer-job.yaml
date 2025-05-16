@@ -15,14 +15,14 @@ spec:
         command: ["/bin/bash", "-c"]
         args: ["
           mkdir -p /mnt/vlan-ip && \
+          apt-get update && apt-get install -y python3 && \
           cp /root/scripts/05-script-ip-list-initialize.sh /mnt/vlan-ip/ && \
           chmod +x /mnt/vlan-ip/05-script-ip-list-initialize.sh && \
-          echo 'Sleeping for 60 seconds before running initialization script...' && \
           /mnt/vlan-ip/05-script-ip-list-initialize.sh $SUBNET
         "]
         env:
         - name: SUBNET
-          value: "172.16.0.0/12"    
+          value: "10.180.0.0/24"    
         volumeMounts:
         - name: vlan-ip-pv
           mountPath: /mnt/vlan-ip
