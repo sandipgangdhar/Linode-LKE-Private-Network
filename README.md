@@ -1,108 +1,102 @@
-# Linode LKE VLAN Manager Solution
+# Linode LKE VLAN Orchestration
 
-## Overview
+This repository contains a fully automated orchestration script and Kubernetes YAML manifests for deploying a VLAN-backed LKE cluster on Linode. This setup includes private VLAN communication for LKE nodes and integration with a Linode VPC.
 
-This solution enables **private networking** for Linode Kubernetes Engine (LKE) clusters using **VLANs** and a **Site-to-Site IPsec VPN**. By integrating VLAN support directly with LKE, workloads can securely communicate with other Linode resources and even external cloud environments like AWS — without traversing the public internet.
+## 📌 **Features:**
 
-### 🔍 **Problem Statement**
-
-By default, LKE clusters cannot be launched inside VPCs or VLANs on Linode. This meant that any internal communication between LKE pods and other Linode resources had to go over the public internet, which:
-
-* Exposes applications to public attack surfaces.
-* Increases latency and data transfer costs.
-* Complicates compliance with data privacy standards.
-
-### 🚀 **Solution Highlights**
-
-* **Private Networking:** LKE nodes are connected to a private VLAN for internal communication.
-* **Seamless Database Access:** Direct access to Linode-hosted databases without public exposure.
-* **Site-to-Site VPN:** Extends private networking to AWS or other data centers securely.
-* **Automated IP Management:** Dynamic IP allocation for VLAN-attached interfaces.
-* **Failover and Health Checks:** Resilient to network failures, with automatic recovery.
+- Fully automated deployment with `00-Orchestration-Script.sh`
+- Private VLAN communication for secure node-to-node communication
+- Site-to-Site VPN support for private IP communication with external data centers
+- Kubernetes-native DaemonSets and Deployments for automated VLAN attachment
+- Seamless IP allocation and release through REST API
+- Health checks and auto-healing mechanisms
 
 ---
 
-## 📌 **Deployment Steps**
+## 🚀 **Deployment Steps:**
 
-1️⃣ **Clone the Repository**
+1️⃣ **Clone the Repository:**
 
 ```bash
-git clone https://github.com/yourusername/linode-lke-vlan-manager.git
-cd linode-lke-vlan-manager
+ git clone <your-repo-url>
+ cd Linode-LKE-VLAN-Orchestration
 ```
 
-2️⃣ **Make the Orchestration Script Executable**
+2️⃣ **Set Kubernetes Context:**
 
 ```bash
-chmod +x orchestration.sh
+kubectl config current-context
 ```
 
-3️⃣ **Run the Orchestration Script**
+3️⃣ **Make the Orchestration Script Executable:**
 
 ```bash
-./orchestration.sh
+chmod +x 00-Orchestration-Script.sh
 ```
 
-4️⃣ **Monitor the Logs**
+4️⃣ **Run the Orchestration Script:**
 
 ```bash
-kubectl logs -f daemonset/vlan-manager -n kube-system
+./00-Orchestration-Script.sh
 ```
 
 ---
 
-## 🖥️ **Validation Steps**
+## 🔎 **Validation:**
 
-1. **Check Pod Communication:**
+To verify the deployment:
 
-   ```bash
-   kubectl exec -it <pod-name> -- ping <private-ip>
-   ```
+```bash
+kubectl get pods -n kube-system
+kubectl get daemonset vlan-manager -n kube-system
+kubectl get deployment vlan-leader-manager -n kube-system
+```
 
-2. **Check VPN Connectivity:**
+Check IP allocations:
 
-   ```bash
-   ping <aws-private-ip>
-   ```
+```bash
+kubectl exec -n kube-system <leader-pod-name> -- cat /mnt/vlan-ip/vlan-ip-list.txt
+```
 
-3. **Monitor VPN Status:**
+Validate routes:
 
-   ```bash
-   sudo ipsec status
-   ```
-
-4. **Monitor DaemonSet Logs:**
-   The orchestration script will output the following commands:
-
-   ```bash
-   kubectl logs -f pod/vlan-manager-xxxxx -n kube-system
-   kubectl logs -f pod/vlan-manager-yyyyy -n kube-system
-   ```
+```bash
+ip route show | grep <DEST_SUBNET>
+```
 
 ---
 
-## 🔄 **Troubleshooting**
+## 🛠️ **Cleanup:**
 
-* If the orchestration script fails, it automatically cleans up all resources, allowing you to re-run without conflicts.
-* Check logs in the namespace:
+To completely remove the deployment:
 
-  ```bash
-  kubectl logs -n kube-system -l app=vlan-manager
-  ```
-* Check for VPN tunnel status:
-
-  ```bash
-  sudo ipsec status
-  ```
+```bash
+./00-Orchestration-Script.sh --cleanup
+```
 
 ---
 
-## 🤝 **Contributing**
+## ⚠️ **Known Issues:**
 
-Feel free to open issues and submit PRs for improvements or bug fixes.
+- Ensure `linode-cli` is properly configured with API tokens.
+- PVC must be released before re-deployment.
+- If the initializer job gets stuck, ensure proper permissions on the PVC.
 
 ---
 
-## 📄 **License**
+## 🤝 **Contributing:**
 
-MIT License
+Feel free to open issues and submit PRs to enhance the automation and deployment experience.
+
+---
+
+## 📄 **License:**
+
+MIT License. See `LICENSE` for more information.
+
+---
+
+## 📧 **Support:**
+
+For any issues, please contact [your-email@example.com].
+
