@@ -11,10 +11,10 @@ data:
         set -e
         
         # === Environment Variables ===
-        SUBNET="${SUBNET:-10.180.0.0/24}"
-        ROUTE_IP="${ROUTE_IP:-10.180.0.1}"
-        VLAN_LABEL="${VLAN_LABEL:-private-lan}"
-        DEST_SUBNET="${DEST_SUBNET:-10.180.2.0/24}"
+        SUBNET="${SUBNET}"
+        ROUTE_IP="${ROUTE_IP}"
+        VLAN_LABEL="${VLAN_LABEL}"
+        DEST_SUBNET="${DEST_SUBNET}"
         
         # === Logging function ===
         log() {
@@ -458,19 +458,3 @@ data:
         # =======================
         if __name__ == '__main__':
             app.run(host='0.0.0.0', port=8080, debug=True)
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: linode-cli-config
-  namespace: kube-system
-data:
-  linode-cli: |
-      [DEFAULT]
-      default-user = sandip_akamai
-      
-      [sandip_akamai]
-      token = 33a230605268bc6303fed1fa81c5888770f93bf290f06fbb7eb9e7fe9e4fd65c
-      region = in-maa
-      authorized_users = sandip_akamai
-      suppress-version-warning = true
