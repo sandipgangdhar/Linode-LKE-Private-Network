@@ -4,96 +4,24 @@ metadata:
   name: vlan-manager-scripts
   namespace: kube-system
 data:
-  01-script-leader-election.sh: |
-        #!/bin/bash
-        
-        # Configuration
-        NAMESPACE="kube-system"
-        POD_NAME=$(hostname)
-        LEADER_ANNOTATION="vlan-manager-leader"
-        LOCK_DURATION="30s"
-        FLASK_APP=/root/scripts/06-rest-api.py
-        FLASK_RUN_PORT=8080
-        
-        # Function to check leadership
-        is_leader() {
-            kubectl get configmap -n $NAMESPACE $LEADER_ANNOTATION -o jsonpath="{.metadata.annotations.leader}" 2>/dev/null
-        }
-        
-        # Attempt to become leader
-        attempt_leadership() {
-            echo "[INFO] Attempting to become leader..."
-            kubectl annotate --overwrite configmap -n $NAMESPACE $LEADER_ANNOTATION leader="$POD_NAME"
-        }
-        
-        # Function to check if Flask is running
-        is_flask_running() {
-            netstat -tuln | grep ":8080"  > /dev/null	
-            return $?
-        }
-        
-        # Function to clean up stale Flask process if found
-        cleanup_flask() {
-            local flask_pid
-            flask_pid=$(netstat -tulnp 2>/dev/null | grep ":8080" | awk '{print $7}' | cut -d'/' -f1)
-            if [ -n "$flask_pid" ]; then
-                echo "[INFO] Killing stale Flask process: $flask_pid"
-                kill -9 "$flask_pid"
-            fi
-        }
-        
-        # Periodic leadership check
-        while true; do
-            current_leader=$(is_leader)
-        
-            if [ -z "$current_leader" ]; then
-                echo "[INFO] No leader found. Attempting to become leader..."
-                attempt_leadership
-                current_leader=$(is_leader) # Re-fetch the leader info after attempting
-        
-                if [ "$current_leader" == "$POD_NAME" ]; then
-                    echo "[INFO] Successfully became the leader: $POD_NAME"
-                else
-                    echo "[INFO] Failed to become leader. Current leader is $current_leader"
-                fi
-            fi
-        
-            if [ "$current_leader" == "$POD_NAME" ]; then
-                echo "[INFO] I am the leader: $POD_NAME"
-        	    # Check if Flask is already running
-        	    if is_flask_running; then
-        		    echo "[INFO] Flask is already running on port 8080, skipping start..."
-        	    else	
-        		    echo "[INFO] Starting Flask server on port 8080..."
-        		    cleanup_flask
-            	    # Start REST API for IP Allocation
-        		    nohup python3 /tmp/06-rest-api.py > /tmp/flask.log 2>&1 &
-        		    echo "[INFO] Flask server started with PID: $!"
-        	    fi
-            else
-                echo "[INFO] Current leader is $current_leader. Sleeping for $LOCK_DURATION..."
-            fi
-            sleep 10
-        done
-
   02-script-vlan-attach.sh: |
         #!/bin/bash
         
-        # Exit on error
+        # === Exit on error ===
         set -e
         
-        # Environment Variables
-        SUBNET="${SUBNET:-192.168.0.0/16}"
-        ROUTE_IP="${ROUTE_IP:-192.168.0.1}"
-        VLAN_LABEL="${VLAN_LABEL:-vlan-1}"
-        DEST_SUBNET="${DEST_SUBNET:-10.10.0.0/16}"
+        # === Environment Variables ===
+        SUBNET="${SUBNET:-10.180.0.0/24}"
+        ROUTE_IP="${ROUTE_IP:-10.180.0.1}"
+        VLAN_LABEL="${VLAN_LABEL:-private-lan}"
+        DEST_SUBNET="${DEST_SUBNET:-10.180.2.0/24}"
         
-        # Logging function
+        # === Logging function ===
         log() {
             echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
         }
         
-        # Function to check if VLAN is already attached
+        # === Function to check if VLAN is already attached ===
         is_vlan_attached() {
             VLAN_STATUS=$(linode-cli linodes config-view "$LINODE_ID" "$CONFIG_ID" --json | jq -r '.[0].interfaces[1].purpose // empty')
             if [ "$VLAN_STATUS" == "vlan" ]; then
@@ -103,62 +31,106 @@ data:
             fi
         }
         
-        # Function to push the route
+        # === Function to push the route ===
         push_route() {
-            ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev eth1 2>/dev/null
-            if [ $? -eq 0 ]; then
-                 log "Route $SUBNET via $ROUTE_IP successfully added to eth1."
+            log "Checking if route already exists for $DEST_SUBNET..."
+            
+            # Temporarily disable exit-on-error
+            set +e
+            ip route show | grep -q "$DEST_SUBNET"
+            STATUS=$?
+            set -e
+            
+            if [ $STATUS -eq 0 ]; then
+                log "✅ Route $DEST_SUBNET already exists. Skipping addition."
             else
-                 log "Route $SUBNET via $ROUTE_IP already exists or failed to add."
+                log "⚙️  Adding route $DEST_SUBNET via $ROUTE_IP on eth1..."
+                
+                # Attempt to add the route
+                set +e
+                ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev eth1
+                ADD_STATUS=$?
+                set -e
+        
+                if [ $ADD_STATUS -eq 0 ]; then
+                    log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to eth1."
+                else
+                    log "⚠️  Failed to add route $DEST_SUBNET via $ROUTE_IP. It may already exist."
+                fi
             fi
         }
         
-        # Get the External IP of the Node
+        # === Discover Linode Information ===
         NODE_IP=$(ip addr show eth0 | grep 'inet ' | awk '{print $2}' | grep '^192\.' | cut -d/ -f1)
-        
-        # Get the Node Name
         NODE_NAME=$(kubectl get nodes -o json | jq -r '.items[] | select(.status.addresses[]?.address == "'"$NODE_IP"'") | .metadata.name')
         
-        # Discover Linode ID based on the instance's public IP
-        log "Fetching Public IP of the instance..."
+        log "🌐 Fetching Public IP of the instance..."
         PUBLIC_IP=$(kubectl get node $NODE_NAME -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}' | awk {'print $1'})
         
         export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
         
-        log "Discovering Linode ID for IP $PUBLIC_IP..."
+        log "🔍 Discovering Linode ID for IP $PUBLIC_IP..."
         LINODE_ID=$(linode-cli linodes list --json | jq -r ".[] | select(.ipv4[] | contains(\"$PUBLIC_IP\")) | .id")
         CONFIG_ID=$(linode-cli linodes configs-list $LINODE_ID --json | jq -r '.[0].id')
         
         if [ -z "$LINODE_ID" ] || [ -z "$CONFIG_ID" ]; then
-            log "Failed to retrieve Linode ID or Config ID. Exiting..."
-            exit 1
-        fi
-        
-        log "Linode ID: $LINODE_ID, Config ID: $CONFIG_ID"
-        
-        # === Main Logic ===
-        log "Checking if VLAN is already attached to Linode instance $LINODE_ID..."
-        if is_vlan_attached; then
-            log "VLAN is already attached. Skipping VLAN configuration and directly pushing the route."
-            push_route
+            log "❌ Failed to retrieve Linode ID or Config ID. Sleeping for 60 seconds and retrying..."
+            sleep 60
+            /tmp/02-script-vlan-attach.sh
             exit 0
         fi
         
-        # If VLAN is not attached, proceed with attachment
-        log "VLAN is not attached. Proceeding with VLAN configuration..."
-        # Allocate IP and release lock
-        IP_ADDRESS1=$(/tmp/03-script-ip-allocate.sh $SUBNET)
-        IP_ADDRESS=$(echo $IP_ADDRESS1 | awk {'print $NF'})
+        log "✅ Linode ID: $LINODE_ID, Config ID: $CONFIG_ID"
         
-        if [ -z "$IP_ADDRESS" ]; then
-            log "No IP address available. Exiting..."
-            exit 1
+        # === Main Logic ===
+        log "🔎 Checking if VLAN is already attached to Linode instance $LINODE_ID..."
+        if is_vlan_attached; then
+            log "✅ VLAN is already attached. Skipping VLAN configuration and directly pushing the route."
+            push_route
+            log "🛌 VLAN configuration complete. Sleeping indefinitely..."
+            sleep infinity
         fi
         
-        log "Allocated IP address: $IP_ADDRESS"
+        # === VLAN Configuration Logic with Retry ===
+        log "❌ VLAN is not attached. Proceeding with VLAN configuration..."
+        MAX_RETRIES=5
+        RETRY_COUNT=0
+        SUCCESS=false
         
-        # Build the JSON for VLAN attachment
-        log "Building VLAN attachment JSON..."
+        while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            log "🔄 Attempting to allocate IP address... (Attempt $((RETRY_COUNT+1))/$MAX_RETRIES)"
+            
+            set +e
+            IP_ADDRESS1=$(/tmp/03-script-ip-allocate.sh $SUBNET)
+            STATUS=$?
+            set -e
+        
+            if [ $STATUS -eq 0 ]; then
+                IP_ADDRESS=$(echo $IP_ADDRESS1 | awk {'print $NF'})
+                if [ -n "$IP_ADDRESS" ]; then
+                    log "✅ Allocated IP address: $IP_ADDRESS"
+                    SUCCESS=true
+                    break
+                else
+                    log "⚠️  No IP address found in response. Retrying..."
+                fi
+            else
+                log "❌ IP allocation script failed. Retrying..."
+            fi
+        
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            sleep 5
+        done
+        
+        if [ "$SUCCESS" = false ]; then
+            log "❌ IP allocation failed after $MAX_RETRIES attempts. Retrying in 60 seconds..."
+            sleep 60
+            /tmp/02-script-vlan-attach.sh
+            exit 0
+        fi
+        
+        # === Build VLAN JSON ===
+        log "⚙️  Building VLAN attachment JSON..."
         INTERFACES_JSON=$(jq -n --arg ip "$IP_ADDRESS" --arg vlan "$VLAN_LABEL" '
             [
               { "type": "public", "purpose": "public" },
@@ -167,40 +139,27 @@ data:
         ')
         echo $INTERFACES_JSON | jq .
         
-        
-        # Attach the VLAN interface
-        log "Attaching VLAN interface to Linode instance..."
+        # === Attach the VLAN interface ===
+        log "⚙️  Attaching VLAN interface to Linode instance..."
         linode-cli linodes config-update "$LINODE_ID" "$CONFIG_ID" --interfaces "$INTERFACES_JSON" --label "Boot Config"
         
-        # Check if the update was successful
-        if [ $? -eq 0 ]; then
-            echo "[INFO] Linode configuration update successful. Checking VLAN status on eth1..."
-            if is_vlan_attached; then
-               echo "[INFO] VLAN is successfully attached to eth1. Initiating reboot..."
-               log "Rebooting Linode instance to apply VLAN configuration..."
-               touch /tmp/rebooting
-               linode-cli linodes reboot "$LINODE_ID"
-        
-               if [ $? -eq 0 ]; then
-                  echo "[INFO] Linode reboot successful."
-               else
-                  echo "[ERROR] Linode reboot failed."
-                  exit 1
-               fi
-           else
-              echo "[ERROR] Linode configuration update failed. Skipping reboot."
-              exit 1
-           fi
+        # === Check Success ===
+        if is_vlan_attached; then
+            log "✅ VLAN successfully attached. Rebooting Linode..."
+            touch /tmp/rebooting 
+            linode-cli linodes reboot "$LINODE_ID"
+            sleep infinity
         else
-            echo "[ERROR] Linode configuration update failed. Skipping reboot."
-            exit 1
+            log "❌ VLAN configuration failed. Retrying in 60 seconds..."
+            sleep 60
+            /tmp/02-script-vlan-attach.sh
+            exit 0
         fi
         
-        
-        # Setup trap to release the IP if the node is deleted or the pod is terminated
+        # === Cleanup Logic ===
         cleanup() {
             if [ -f "/tmp/rebooting" ]; then
-                echo "[INFO] Skipping IP release due to planned reboot."
+                log "Skipping IP release due to planned reboot."
                 rm -rfv /tmp/rebooting
             else
                 log "Releasing IP address $IP_ADDRESS..."
@@ -210,274 +169,295 @@ data:
         }
         trap cleanup EXIT
         
-        log "VLAN Attachment completed successfully."
-        log "Instance $LINODE_ID is now connected to VLAN $VLAN_LABEL with IP $IP_ADDRESS."
+        log "✅ VLAN Attachment completed successfully."
+        log "🌐 Instance $LINODE_ID is now connected to VLAN $VLAN_LABEL with IP $IP_ADDRESS."
+        log "🛌 Script execution complete. Sleeping indefinitely..."
+        sleep infinity
 
   03-script-ip-allocate.sh: |
         #!/bin/bash
+        # Exit on error
+        set -e
         
-        # Configuration
-        LEADER_SERVICE_URL="http://vlan-leader-service.kube-system.svc.cluster.local:8080/allocate"
+        # API Endpoint for IP allocation
+        API_ENDPOINT="http://vlan-leader-service.kube-system.svc.cluster.local:8080/allocate"
+        SUBNET=$1
         
-        # Log the request
-        echo "[INFO] $(date) Requesting IP from Leader at $LEADER_SERVICE_URL..."
+        # Logging function
+        log() {
+            echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
+        }
         
-        # Send HTTP POST request to the leader service
-        response=$(curl -s -X POST $LEADER_SERVICE_URL -H "Content-Type: application/json" -d '{}')
-        
-        # Check if the response contains an allocated IP
-        if echo "$response" | grep -q "allocated_ip"; then
-            allocated_ip=$(echo "$response" | jq -r '.allocated_ip')
-            echo "[INFO] $(date) Successfully allocated IP: $allocated_ip"
-            echo "$allocated_ip"
-        else
-            echo "[ERROR] $(date) Failed to allocate IP. Response from leader: $response"
+        error() {
+            echo "[ERROR] $(date '+%Y-%m-%d %H:%M:%S') $1"
             exit 1
+        }
+        
+        # === Main Logic ===
+        if [ -z "$SUBNET" ]; then
+            error "No subnet provided for IP allocation."
+        fi
+        
+        log "Requesting IP from API at $API_ENDPOINT for Subnet: $SUBNET..."
+        
+        # Execute the curl command and capture response and status code
+        RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/response_body.txt -X POST $API_ENDPOINT \
+            -H "Content-Type: application/json" \
+            -d "{\"subnet\": \"$SUBNET\"}")
+        HTTP_CODE="${RESPONSE: -3}"
+        RESPONSE_BODY=$(cat /tmp/response_body.txt)
+        
+        # Evaluate the response
+        if [ "$HTTP_CODE" == "200" ]; then
+            ALLOCATED_IP=$(echo $RESPONSE_BODY | jq -r '.allocated_ip')
+            log "Successfully allocated IP: $ALLOCATED_IP"
+            echo $ALLOCATED_IP
+        else
+            case $HTTP_CODE in
+                404)
+                    error "API Endpoint not found. Service 'vlan-leader-service' may not be running in namespace 'kube-system'."
+                    ;;
+                500)
+                    error "No IP addresses available in the provided subnet."
+                    ;;
+                400)
+                    error "Bad request. The subnet format is incorrect."
+                    ;;
+                000)
+                    error "Cannot reach the API. Possible DNS issue or service is down."
+                    ;;
+                *)
+                    error "Unexpected error (HTTP $HTTP_CODE) from API: $RESPONSE_BODY"
+                    ;;
+            esac
         fi
         
   04-script-ip-release.sh: |
         #!/bin/bash
+        # Exit on error
+        set -e
         
-        # Configuration
-        LEADER_SERVICE_URL="http://vlan-leader-service.kube-system.svc.cluster.local:8080/release"
+        # API Endpoint for IP release
+        API_ENDPOINT="http://vlan-leader-service.kube-system.svc.cluster.local:8080/release"
+        IP_ADDRESS=$1
         
-        # Check if IP is provided
-        if [ -z "$1" ]; then
-            echo "[ERROR] $(date) No IP address provided for release."
+        # Logging function
+        log() {
+            echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
+        }
+        
+        error() {
+            echo "[ERROR] $(date '+%Y-%m-%d %H:%M:%S') $1"
             exit 1
+        }
+        
+        # === Main Logic ===
+        if [ -z "$IP_ADDRESS" ]; then
+            error "No IP address provided for release."
         fi
         
-        IP_TO_RELEASE="$1"
+        log "Requesting IP release from API at $API_ENDPOINT for IP: $IP_ADDRESS..."
         
-        # Log the release request
-        echo "[INFO] $(date) Releasing IP $IP_TO_RELEASE to Leader at $LEADER_SERVICE_URL..."
+        # Execute the curl command and capture response and status code
+        RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/response_body.txt -X POST $API_ENDPOINT -H "Content-Type: application/json" -d "{\"ip_address\": \"$IP_ADDRESS\"}")
+        HTTP_CODE="${RESPONSE: -3}"
+        RESPONSE_BODY=$(cat /tmp/response_body.txt)
         
-        # Send HTTP POST request to the leader service to release the IP
-        response=$(curl -s -X POST $LEADER_SERVICE_URL -H "Content-Type: application/json" -d "{\"ip\": \"$IP_TO_RELEASE\"}")
-        
-        # Check if the response contains the released IP
-        if echo "$response" | grep -q "released_ip"; then
-            released_ip=$(echo "$response" | jq -r '.released_ip')
-            echo "[INFO] $(date) Successfully released IP: $released_ip"
-            exit 0
+        # Evaluate the response
+        if [ "$HTTP_CODE" == "200" ]; then
+            log "Successfully released IP: $IP_ADDRESS"
+            echo $IP_ADDRESS
         else
-            echo "[ERROR] $(date) Failed to release IP. Response from leader: $response"
-            exit 1
+            case $HTTP_CODE in
+                404)
+                    error "IP address $IP_ADDRESS not found in the allocation list."
+                    ;;
+                400)
+                    error "Bad request. Possibly malformed JSON or missing IP address."
+                    ;;
+                000)
+                    error "Cannot reach the API. Possible DNS issue or service is down."
+                    ;;
+                *)
+                    error "Unexpected error (HTTP $HTTP_CODE) from API: $RESPONSE_BODY"
+                    ;;
+            esac
         fi
         
   05-script-ip-list-initialize.sh: |
         #!/bin/bash
+        # Exit on error
+        set -e
         
-        # Usage: ./05-script-ip-list-initialize.sh <subnet>
-        # Example: ./05-script-ip-list-initialize.sh 192.168.0.0/16
+        # File paths for IP allocation
+        IP_FILE_PATH="/mnt/vlan-ip/vlan-ip-list.txt"
+        RESERVED_IP_FILE="/mnt/vlan-ip/reserved-ips.txt"
+        SUBNET=$1
         
-        if [ -z "$1" ]; then
-            echo "[ERROR] Usage: ./05-script-ip-list-initialize.sh <subnet>"
+        # Logging function
+        log() {
+            echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
+        }
+        
+        # === Check if the file already has data ===
+        if [ -f "$IP_FILE_PATH" ] && [ -s "$IP_FILE_PATH" ]; then
+            log "IP List file already initialized. Skipping initialization."
+            exit 0
+        fi
+        
+        # Initialize the files if not present
+        if [ ! -f "$IP_FILE_PATH" ]; then
+            log "Creating IP list file at $IP_FILE_PATH"
+            touch $IP_FILE_PATH
+        fi
+        
+        if [ ! -f "$RESERVED_IP_FILE" ]; then
+            log "Creating Reserved IP list file at $RESERVED_IP_FILE"
+            touch $RESERVED_IP_FILE
+        fi
+        
+        if [ -z "$SUBNET" ]; then
+            log "No subnet provided. Exiting..."
             exit 1
         fi
         
-        SUBNET="$1"
-        IP_LIST_FILE="/mnt/vlan-ip/vlan-ip-list.txt"
+        # === Calculate IP addresses without ipcalc ===
+        NETWORK_PREFIX=$(echo $SUBNET | cut -d'/' -f2)
+        IFS=. read -r i1 i2 i3 i4 <<< "$(echo $SUBNET | cut -d'/' -f1)"
         
-        # Check if the file already exists and has data
-        if [ -f "$IP_LIST_FILE" ] && [ -s "$IP_LIST_FILE" ]; then
-            echo "[ERROR] IP list already initialized at $IP_LIST_FILE."
-            echo "[INFO] If you want to reinitialize, please delete the file manually and re-run the script."
-            exit 1
-        fi
+        # Network IP (x.x.x.0)
+        NETWORK_IP="$i1.$i2.$i3.0/$NETWORK_PREFIX"
         
-        # Extract the base IP and the prefix
-        IFS='/' read -r BASE_IP PREFIX <<< "$SUBNET"
+        # First usable IP (x.x.x.1)
+        FIRST_IP="$i1.$i2.$i3.1/$NETWORK_PREFIX"
         
-        # Initialize the file
-        echo "[INFO] Initializing IP list in $IP_LIST_FILE"
-        rm -f $IP_LIST_FILE
-        touch $IP_LIST_FILE
+        # Broadcast IP (x.x.x.255)
+        BROADCAST_IP="$i1.$i2.$i3.255/$NETWORK_PREFIX"
         
-        #  **Write the Subnet Range as the First Line**
-        echo "$SUBNET" > $IP_LIST_FILE
+        # Reserved IPs Array
+        RESERVED_IPS=("$NETWORK_IP" "$FIRST_IP" "$BROADCAST_IP")
         
-        # Generate Reserved IPs
-        IFS='.' read -r o1 o2 o3 o4 <<< "$BASE_IP"
+        log "Reserved IPs for subnet $SUBNET: ${RESERVED_IPS[*]}"
         
-        # First IP
-        echo "$o1.$o2.$o3.$o4,RESERVED" >> $IP_LIST_FILE
-        # Second IP
-        echo "$o1.$o2.$o3.$((o4 + 1)),RESERVED" >> $IP_LIST_FILE
+        # Adding reserved IPs to both files
+        log "Adding reserved IPs to the allocation list and reserved list..."
+        for ip in "${RESERVED_IPS[@]}"; do
+            if ! grep -q "^$ip$" "$IP_FILE_PATH"; then
+                echo "$ip" >> "$IP_FILE_PATH"
+                log "Reserved IP added to list: $ip"
+            fi
+            if ! grep -q "^$ip$" "$RESERVED_IP_FILE"; then
+                echo "$ip" >> "$RESERVED_IP_FILE"
+                log "Reserved IP added to reserved list: $ip"
+            fi
+        done
         
-        # Calculate the last IP in the subnet correctly
-        python3 -c "
-        import ipaddress
-        net = ipaddress.IPv4Network('$SUBNET')
-        print(f'{net[-1]},RESERVED')
-        " >> $IP_LIST_FILE
-        
-        echo "[INFO] IP list initialization complete."
+        log "Reserved IPs initialization completed."
 
   06-rest-api.py: |
-        #!/usr/bin/env python3
+        from flask import Flask, jsonify, request
+        from flask_cors import CORS
         import os
-        import requests
-        import json
-        import subprocess
-        from flask import Flask, request, jsonify, abort
-      
+        import ipaddress
         
         app = Flask(__name__)
-        # === Initialize Environment Variables ===
-        # Get the hostname
-        hostname = subprocess.check_output("hostname", shell=True).decode().strip()
-
-        # Set the environment variable
-        os.environ['POD_NAME'] = hostname
-
-        # Verify the environment variable is set
-        print("POD_NAME:", os.getenv('POD_NAME'))
+        CORS(app)
         
-        # Environment Variables
-        LEADER_ANNOTATION = os.getenv("LEADER_ANNOTATION", "vlan-manager-leader")
-        POD_NAME = os.getenv("POD_NAME", "unknown-pod")
-        NAMESPACE = os.getenv("NAMESPACE", "kube-system")
-        API_SERVER = os.getenv("API_SERVER", "https://kubernetes.default.svc")
-        SERVICE_ACCOUNT_TOKEN = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-        CACERT = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-        IP_LIST_FILE = "/mnt/vlan-ip/vlan-ip-list.txt"
-        LOCK_FILE = "/mnt/vlan-ip/vlan-ip-list.lock"
+        # File path for IP allocation
+        IP_FILE_PATH = "/mnt/vlan-ip/vlan-ip-list.txt"
         
-        # Kubernetes API Headers
-        def get_headers():
-            with open(SERVICE_ACCOUNT_TOKEN, "r") as token_file:
-                token = token_file.read()
-            return {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
+        # Initialize the file if not present
+        if not os.path.exists(IP_FILE_PATH):
+            with open(IP_FILE_PATH, 'w') as f:
+                f.write("")
         
-        # Kubernetes API Call
-        def k8s_api_call(method, path, data=None):
-            url = f"{API_SERVER}{path}"
-            headers = get_headers()
-            response = requests.request(method, url, headers=headers, json=data, verify=CACERT)
-            response.raise_for_status()
-            return response.json()
-        
-        # Leader Check
-        def is_leader():
-            try:
-                cm = k8s_api_call("GET", f"/api/v1/namespaces/{NAMESPACE}/configmaps/{LEADER_ANNOTATION}")
-                return cm.get("metadata", {}).get("annotations", {}).get("leader") == POD_NAME
-            except requests.HTTPError as e:
-                print(f"[ERROR] Kubernetes API Error: {e}")
-                return False
-        
-        # Read the Subnet from the first line of IP List
-        def get_subnet_and_range():
-            try:
-                with open(IP_LIST_FILE, "r") as file:
-                    first_line = file.readline().strip()
-                    subnet, prefix = first_line.split('/')
-                    total_ips = 2 ** (32 - int(prefix))
-                    return subnet, total_ips
-            except Exception as e:
-                print(f"[ERROR] Failed to read subnet info: {e}")
-                abort(500)
-        
-        # Read allocated IPs
-        def read_allocated_ips():
-            try:
-                with open(IP_LIST_FILE, "r") as file:
-                    next(file)  # Skip the first line (subnet definition)
-                    return {line.split(",")[0].strip() for line in file}
-            except Exception as e:
-                print(f"[ERROR] Failed to read allocated IPs: {e}")
-                abort(500)
-        
-        # IP Allocation
+        # =======================
+        # 🟢 Allocate IP Endpoint
+        # =======================
         @app.route('/allocate', methods=['POST'])
         def allocate_ip():
-            if not is_leader():
-                return jsonify({"error": "Not the leader"}), 403
+            try:
+                # Read the requested subnet
+                subnet = request.json.get('subnet')
+                if not subnet:
+                    return jsonify({"error": "Subnet not provided"}), 400
+                
+                # Validate the subnet
+                try:
+                    ip_net = ipaddress.ip_network(subnet, strict=False)
+                    cidr_suffix = f"/{ip_net.prefixlen}"
+                except ValueError:
+                    return jsonify({"error": "Invalid subnet format"}), 400
+                
+                # Reserved IPs (first, second, and last)
+                reserved_ips = {str(ip_net.network_address), str(ip_net[1]), str(ip_net[-1])}
+                
+                # Read the current IP list
+                with open(IP_FILE_PATH, 'r+') as f:
+                    ip_list = f.read().splitlines()
+                    
+                    for ip in ip_net.hosts():
+                        candidate_ip = f"{ip}{cidr_suffix}"
+                        
+                        # Skip reserved IPs
+                        if candidate_ip in reserved_ips:
+                            continue
         
-            # Read the subnet from the first line
-            with open(IP_LIST_FILE, "r") as ip_list:
-                first_line = ip_list.readline().strip()
-                subnet = first_line
-        
-            # Extract subnet details
-            base_ip, prefix = subnet.split('/')
-            prefix = int(prefix)
-            total_ips = 2**(32 - prefix)
-        
-            # Read all allocated IPs from the list
-            allocated_ips = set()
-            with open(IP_LIST_FILE, "r") as ip_list:
-                for line in ip_list:
-                    if ',' in line:
-                        ip, status = line.strip().split(',')
-                        allocated_ips.add(ip)
-        
-            # Generate IP addresses dynamically
-            base_octets = base_ip.split('.')
-            for i in range(1, total_ips - 1):
-                octet3 = (i // 256) % 256
-                octet4 = i % 256
-                candidate_ip = f"{base_octets[0]}.{base_octets[1]}.{octet3}.{octet4}"
-                if candidate_ip not in allocated_ips:
-                    with open(IP_LIST_FILE, "a") as ip_list:
-                        ip_list.write(f"{candidate_ip},USED\n")
-                    print(f"[INFO] Allocated IP: {candidate_ip}/{prefix}")
-                    return jsonify({"allocated_ip": f"{candidate_ip}/{prefix}"})
-        
-            return jsonify({"error": "No IP available"}), 500
-        
-        # IP Release
+                        # Check if it's already allocated
+                        if candidate_ip not in ip_list:
+                            f.write(f"{candidate_ip}\n")
+                            return jsonify({"allocated_ip": candidate_ip}), 200
+                
+                return jsonify({"error": "No IPs available in the range"}), 500
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
+        # =======================
+        # 🔴 Release IP Endpoint
+        # =======================
         @app.route('/release', methods=['POST'])
         def release_ip():
-            if not is_leader():
-                return jsonify({"error": "Not the leader"}), 403
+            try:
+                ip_address = request.json.get('ip_address')
+                if not ip_address:
+                    return jsonify({"error": "IP address not provided"}), 400
         
-            ip_to_release = request.json.get("ip")
-            if not ip_to_release:
-                return jsonify({"error": "IP address not provided"}), 400
+                # Read and remove the IP address
+                with open(IP_FILE_PATH, 'r') as f:
+                    ip_list = [line.strip() for line in f.read().splitlines()]
         
-            found = False
-            lines = []
+                # Read the reserved IP list
+                with open('/mnt/vlan-ip/reserved-ips.txt', 'r') as f:
+                    reserved_ips = [line.strip() for line in f.read().splitlines()]
         
-            # Read the file and check if the IP is used
-            with open("/mnt/vlan-ip/vlan-ip-list.txt", "r") as f:
-                lines = f.readlines()
+                # Strip the input IP too
+                ip_address = ip_address.strip()
         
-            # Loop through the lines and find the IP
-            for i, line in enumerate(lines):
-                if line.startswith(ip_to_release) and "USED" in line:
-                    found = True
-                    lines[i] = f"{ip_to_release},AVAILABLE\n"
-                    break
+                # === New Logic: Prevent reserved IP release ===
+                if ip_address in reserved_ips:
+                    return jsonify({"error": f"IP address {ip_address} is reserved and cannot be released."}), 403
         
-            # If IP was found and changed to AVAILABLE, write back to the file
-            if found:
-                with open("/mnt/vlan-ip/vlan-ip-list.txt", "w") as f:
-                    f.writelines(lines)
-                print(f"[INFO] Released IP: {ip_to_release}")
-                return jsonify({"released_ip": ip_to_release})
-            else:
-                print(f"[ERROR] IP address not found or not used: {ip_to_release}")
-                return jsonify({"error": "IP address not found or not in use"}), 404
+                if ip_address in ip_list:
+                    ip_list.remove(ip_address)
+                    with open(IP_FILE_PATH, 'w') as f:
+                        f.write("\n".join(ip_list) + "\n")
+                    return jsonify({"status": "IP released", "ip": ip_address}), 200
+                else:
+                    return jsonify({"error": f"IP address {ip_address} not found in the allocation list."}), 404
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+        # =======================
+        # 🔵 Health Check Endpoint
+        # =======================
+        @app.route('/health', methods=['GET'])
+        def health_check():
+            return jsonify({"status": "healthy"}), 200
         
-        # Flask app runner
+        # =======================
+        # 🚀 Start Flask Application
+        # =======================
         if __name__ == '__main__':
-            app.run(host='0.0.0.0', port=8080)
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: vlan-manager-leader
-  namespace: kube-system
-  annotations:
-    description: "Holds the leader election information for VLAN Manager."
-    leader: ""
-data:
-  description: "Holds the leader election information for VLAN Manager."
+            app.run(host='0.0.0.0', port=8080, debug=True)
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -486,14 +466,11 @@ metadata:
   namespace: kube-system
 data:
   linode-cli: |
-    [DEFAULT]
-    default-user = sgangdha
-
-    [sgangdha]
-    token = dbe8ba8e2f3ddf8a7488e8f56152c9d7a931d0ae6a837a5916ee6d48654e3b55
-    region = in-maa
-    plugin-obj-access-key = RCWTMC4K2KX2GUZQTDWQ
-    plugin-obj-secret-key = iYwHRnrZ2f3TMG4f63Vo2vM3E9rgcvKDglUAezYy
-    plugin-obj-cluster = in-bom-2
-    authorized_users = sgangdha
-    suppress-version-warning = true
+      [DEFAULT]
+      default-user = sandip_akamai
+      
+      [sandip_akamai]
+      token = 33a230605268bc6303fed1fa81c5888770f93bf290f06fbb7eb9e7fe9e4fd65c
+      region = in-maa
+      authorized_users = sandip_akamai
+      suppress-version-warning = true

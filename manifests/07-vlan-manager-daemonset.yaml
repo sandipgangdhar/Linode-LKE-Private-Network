@@ -23,26 +23,67 @@ spec:
           command: ["/bin/bash", "-c"]
           args: 
             - |
+              echo "🔄 Starting VLAN Manager Setup..."
+
+              # === Install Dependencies ===
               apt-get update && \
               apt-get install -y jq apt-transport-https ca-certificates curl net-tools iproute2 && \
-              curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add - && \
+              echo "✅ Dependencies installed successfully."
+              # === Check Installation ===
+              if ! command -v ip &> /dev/null; then
+                  echo "❌ ip command not found. Installation failed."
+                  exit 1
+              fi
+              if ! command -v ifconfig &> /dev/null; then
+                  echo "❌ net-tools package not found. Installation failed."
+                  exit 1
+              fi
+              if ! command -v jq &> /dev/null; then
+                  echo "❌ jq command not found. Installation failed."
+                  exit 1
+              fi
+
+              # === Install kubectl ===
               curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
-              chmod +x kubectl && \
-              mv kubectl /usr/local/bin/kubectl && \
-              mkdir -p /host-root/root/.ssh && \ # <--- Added for ssh 
-              chmod 700 /host-root/root/.ssh && \ # <--- Added for ssh 
+              chmod +x kubectl && mv kubectl /usr/local/bin/kubectl && \
+              echo "✅ kubectl installed successfully."
+              # === Check Installation ===
+              if ! command -v kubectl &> /dev/null; then
+                  echo "❌ kubectl command not found. Installation failed."
+                  exit 1
+              fi
+
+              # === Install Python dependencies ===
               pip install --upgrade pip && \
+              # === Check Installation ===
+              if ! command -v pip &> /dev/null; then
+                  echo "❌ pip command not found. Installation failed."
+                  exit 1
+              fi
               pip install linode-cli && \
+              echo "✅ Linode CLI installed successfully."
+              # === Check Installation ===
+              if ! command -v linode-cli &> /dev/null; then
+                  echo "❌ linode-cli command not found. Installation failed."
+                  exit 1
+              fi
+
+              # === Configure Linode CLI ===
               mkdir -p /root/.linode-cli && \
               cp /mnt/linode-cli/* /root/.linode-cli/ && \
               chmod 600 /root/.linode-cli/* && \
-              export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
+              export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli" && \
+              echo "✅ Linode CLI configuration completed."
+
+              # === Copy Scripts ===
               cp --dereference /root/scripts/02-script-vlan-attach.sh /tmp/02-script-vlan-attach.sh && \
               chmod u+x /tmp/02-script-vlan-attach.sh && \
               cp --dereference /root/scripts/03-script-ip-allocate.sh /tmp/03-script-ip-allocate.sh && \
               chmod u+x /tmp/03-script-ip-allocate.sh && \
-              cp --dereference /root/scripts/02-script-vlan-attach.sh /tmp/02-script-vlan-attach.sh && \
-              chmod u+x /tmp/02-script-vlan-attach.sh && \
+              echo "✅ Scripts copied and permissions set."
+
+              # === Generate kubeconfig ===
+              echo "🔄 Generating kubeconfig..."
               cat <<EOF > /tmp/kubeconfig
               apiVersion: v1
               kind: Config
@@ -62,24 +103,41 @@ spec:
                 user:
                   token: $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
               EOF
-              export KUBECONFIG=/tmp/kubeconfig  && \
+
+              export KUBECONFIG=/tmp/kubeconfig
+              echo "✅ kubeconfig generated successfully."
+
+              # === Execute VLAN Attachment Script ===
+              echo "🚀 Starting VLAN Attachment Script..."
               /tmp/02-script-vlan-attach.sh
+              echo "🛌 Script execution complete. Sleeping indefinitely..."
+              sleep infinity
+
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+
+          env:
+            - name: SUBNET
+              value: "10.180.0.0/24"
+            - name: VLAN_LABEL
+              value: "private-lan"
+            - name: KUBECONFIG
+              value: "/tmp/kubeconfig"
+            - name: ROUTE_IP
+              value: "10.180.0.2"    
+            - name: DEST_SUBNET
+              value: "10.180.2.0/24"
           volumeMounts:
             - name: vlan-manager-scripts
               mountPath: /root/scripts
             - name: linode-cli-config
               mountPath: /mnt/linode-cli
-          env:
-            - name: SUBNET
-              value: "172.16.0.0/12"
-            - name: VLAN_LABEL
-              value: "Linode-AWS"
-            - name: KUBECONFIG
-              value: "/tmp/kubeconfig"
-            - name: ROUTE_IP
-              value: "172.16.0.1"    
-            - name: DEST_SUBNET
-              value: "10.0.0.0/16"    
+
       volumes:
         - name: vlan-manager-scripts
           configMap:
