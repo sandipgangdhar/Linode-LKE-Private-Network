@@ -98,5 +98,5 @@ MIT License. See `LICENSE` for more information.
 
 ## 📧 **Support:**
 
-For any issues, please contact [your-email@example.com].
+For any issues, please contact [sandip.gangdhar@gmail.com].
 
