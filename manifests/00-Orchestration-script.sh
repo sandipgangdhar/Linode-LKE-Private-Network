@@ -29,6 +29,13 @@ cleanup() {
     echo "✅ Cleanup complete."
 }
 
+# === Argument Parsing ===
+if [[ "$1" == "--cleanup" ]]; then
+    echo "🧹 Cleanup flag detected. Initiating cleanup..."
+    cleanup
+    exit 0
+fi
+
 trap cleanup EXIT
 
 # === Step 1: Apply StorageClass ===
