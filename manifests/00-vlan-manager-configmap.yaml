@@ -14,7 +14,7 @@ data:
       default-user = sandip_akamai
             
       [sandip_akamai]
-      token = 33a230605268bc6303fed1fa81c5888770f93bf290f06fbb7eb9e7fe9e4fd65c
+      token = ksdjbkjdsbvhkdsbvkdsnkdvnb
       region = in-maa
       authorized_users = sandip_akamai
       suppress-version-warning = true
