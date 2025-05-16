@@ -65,129 +65,90 @@ This guide provides step-by-step instructions for deploying the Linode LKE VLAN 
     ```
 
 ---
+## 🛠️ Cleanup:
+To completely remove the deployment, execute the following command:
 
-## 🛠️ **Cleanup:**  
-
-To completely remove the deployment:  
-   ```bash
-   ./00-Orchestration-Script.sh --cleanup
+    ./00-Orchestration-script.sh --cleanup
 
 ---
 
-## ⚠️ **Troubleshooting:**  
-
+## ⚠️ Troubleshooting:
 If you encounter any issues during deployment, follow the steps below to diagnose and fix the problem:
 
 ---
 
-### 1️⃣ **VLAN Leader Manager is not healthy:**
-- **Check the logs for errors:**
-    ```bash
+### 1️⃣ VLAN Leader Manager is not healthy:
+- **Check the logs for errors:**  
     kubectl logs -f deployment/vlan-leader-manager -n kube-system
-    ```
 
-- **Verify if the pod is running:**
-    ```bash
+- **Verify if the pod is running:**  
     kubectl get pods -n kube-system | grep vlan-leader-manager
-    ```
 
-- **Restart the deployment if necessary:**
-    ```bash
+- **Restart the deployment if necessary:**  
     kubectl rollout restart deployment/vlan-leader-manager -n kube-system
-    ```
 
 ---
 
-### 2️⃣ **VLAN Manager DaemonSet is not ready:**
-- **Check the logs for individual pods:**
-    ```bash
+### 2️⃣ VLAN Manager DaemonSet is not ready:
+- **Check the logs for individual pods:**  
     kubectl logs -f daemonset/vlan-manager -n kube-system
-    ```
 
-- **Check if all pods are running:**
-    ```bash
+- **Check if all pods are running:**  
     kubectl get pods -n kube-system | grep vlan-manager
-    ```
 
-- **Restart the DaemonSet if required:**
-    ```bash
+- **Restart the DaemonSet if required:**  
     kubectl rollout restart daemonset/vlan-manager -n kube-system
-    ```
 
 ---
 
-### 3️⃣ **IP allocation is not happening correctly:**
-- **Check the VLAN Leader Manager logs:**
-    ```bash
+### 3️⃣ IP allocation is not happening correctly:
+- **Check the VLAN Leader Manager logs:**  
     kubectl logs -f deployment/vlan-leader-manager -n kube-system
-    ```
 
-- **Verify the contents of the IP list:**
-    ```bash
+- **Verify the contents of the IP list:**  
     kubectl exec -n kube-system <leader-pod-name> -- cat /mnt/vlan-ip/vlan-ip-list.txt
-    ```
 
-- **Check if the IP exists or is marked as reserved:**
+- **Check if the IP exists or is marked as reserved:**  
     - Ensure the IP is not part of the reserved list (first two and last IP of the subnet).
 
 ---
 
-### 4️⃣ **PersistentVolumeClaim (PVC) issues:**
-- **Check the PVC status:**
-    ```bash
+### 4️⃣ PersistentVolumeClaim (PVC) issues:
+- **Check the PVC status:**  
     kubectl describe pvc vlan-ip-pvc -n kube-system
-    ```
 
-- **If PVC is stuck in pending or not attaching:**
-    ```bash
+- **If PVC is stuck in pending or not attaching:**  
     kubectl get pv | grep vlan-ip-pvc
-    ```
 
-- **Check for logs of the associated pod that mounted the PVC:**
-    ```bash
+- **Check for logs of the associated pod that mounted the PVC:**  
     kubectl logs -f pod/<pod-name> -n kube-system
-    ```
 
 ---
 
-### 5️⃣ **Route is not getting added to eth1:** 
-- **Verify if the route exists:**
-    ```bash
+### 5️⃣ Route is not getting added to eth1:
+- **Verify if the route exists:**  
     ip route show | grep <DEST_SUBNET>
-    ```
 
-- **Manually add the route if missing:**
-    ```bash
+- **Manually add the route if missing:**  
     ip route add <DEST_SUBNET> via <ROUTE_IP> dev eth1
-    ```
 
-- **Check for errors in `/tmp/02-script-vlan-attach.sh` logs:**
-    ```bash
+- **Check for errors in `/tmp/02-script-vlan-attach.sh` logs:**  
     cat /tmp/vlan-attach.log
-    ```
 
 ---
 
-### 6️⃣ **General Debugging Commands:**  
-- **Get all pods and their status:**
-    ```bash
+### 6️⃣ General Debugging Commands:
+- **Get all pods and their status:**  
     kubectl get pods -n kube-system
-    ```
 
-- **Check logs for a specific pod:**
-    ```bash
+- **Check logs for a specific pod:**  
     kubectl logs -f pod/<pod-name> -n kube-system
-    ```
 
-- **Describe the pod for detailed info:**
-    ```bash
+- **Describe the pod for detailed info:**  
     kubectl describe pod <pod-name> -n kube-system
-    ```
 
-- **Check if Linode CLI is configured properly:**
-    ```bash
+- **Check if Linode CLI is configured properly:**  
     linode-cli linodes list
-    ```
 
 ---
 
