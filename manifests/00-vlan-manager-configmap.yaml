@@ -69,8 +69,8 @@ data:
       [sgangdha]
       token = <YOUR LINODE API KEY>
       region = in-maa
-      plugin-obj-access-key = RCWTMC4K2KX2GUZQTDWQ
-      plugin-obj-secret-key = iYwHRnrZ2f3TMG4f63Vo2vM3E9rgcvKDglUAezYy
+      plugin-obj-access-key = <YOUR LINODE obj storage access API KEY>
+      plugin-obj-secret-key = <YOUR LINODE obj storage secret API KEY>
       plugin-obj-cluster = in-bom-2
       authorized_users = sgangdha
       suppress-version-warning = true
