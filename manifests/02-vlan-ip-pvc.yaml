@@ -1,12 +1,57 @@
+# 02-vlan-ip-pvc.yaml                                                                  
+#                                                                                      
+# This YAML file defines a PersistentVolumeClaim (PVC) for Linode Block Storage.       
+# It is used to request persistent storage of 1Gi with ReadWriteOnce access.           
+# The PVC is bound to the 'linode-block-storage' StorageClass.                         
+#                                                                                      
+# -----------------------------------------------------                                
+# 📝 Parameters:                                                                       
+#                                            
+# 1️⃣ name              - The name of the PersistentVolumeClaim.                          
+# 2️⃣ namespace         - The namespace where this PVC is created.                        
+# 3️⃣ accessModes       - Defines how the volume can be accessed.                         
+#                         - 'ReadWriteOnce': Mounted as read/write by a single node.   
+# 4️⃣ resources         - Specifies the requested storage capacity.                       
+# 5️⃣ storageClassName  - Binds the PVC to the specified StorageClass.                    
+#                                                                                      
+# -----------------------------------------------------                                
+# 🔄 Usage:                                                                            
+#                                                                                      
+# - This PVC is used to mount a Linode Block Storage volume to a Pod.                  
+# - Any Pod that uses this claim will have access to the 1Gi of persistent storage.    
+#                                                                                      
+# -----------------------------------------------------                                
+# 📌 Best Practices:                                                                   
+#                                                                                      
+# - For multi-node read/write access, consider using 'ReadWriteMany'.                  
+# - Regularly monitor usage to prevent overflow on the 1Gi allocation.                 
+#                                                                                      
+# -----------------------------------------------------                                
+# 🖋️ Author:                                                                           
+# - Sandip Gangdhar                                                                    
+# - GitHub: https://github.com/sandipgangdhar                                          
+#                                                                                      
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025                   
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
+  # Name of the PersistentVolumeClaim
   name: vlan-ip-pvc
+
+  # Namespace in which the PVC is created
   namespace: kube-system
 spec:
+  # Access mode defines how the storage can be mounted
+  # ReadWriteOnce: Mounted on a single node at a time
   accessModes:
     - ReadWriteOnce
+
+  # Storage resource requests
   resources:
     requests:
+      # The amount of storage requested
       storage: 1Gi
+  
+  # The storage class to be used for the PVC
   storageClassName: linode-block-storage

@@ -1,0 +1,20 @@
+⚠️ [INFO] No VLAN IPs found for Linode ID 77146722
+⚠️ [INFO] No VLAN IPs found for Linode ID 77146723
+✅ [SUCCESS] VLAN IPs found for Linode ID 77020222 - 172.16.1.10/12
+⚠️ [INFO] No VLAN IPs found for Linode ID 77146725
+✅ [SUCCESS] VLAN IPs found for Linode ID 77018163 - 172.16.0.1/12
+-e ⚠️ [INFO] No VLAN IPs found for Linode ID 77146722
+-e ✅ [SUCCESS] VLAN IPs found for Linode ID 77020222 - 172.16.1.10/12
+-e ⚠️ [INFO] No VLAN IPs found for Linode ID 77146723
+-e ✅ [SUCCESS] VLAN IPs found for Linode ID 77018163 - 172.16.0.1/12
+-e ⚠️ [INFO] No VLAN IPs found for Linode ID 77146725
+-e ✅ [SUCCESS] VLAN IPs found for Linode ID 77020222 - 172.16.1.10/12
+-e ⚠️ [INFO] No VLAN IPs found for Linode ID 77146725
+-e ✅ [SUCCESS] VLAN IPs found for Linode ID 77018163 - 172.16.0.1/12
+-e ⚠️ [INFO] No VLAN IPs found for Linode ID 77146723
+-e ⚠️ [INFO] No VLAN IPs found for Linode ID 77146722
+-e ✅ [SUCCESS] VLAN IPs found for Linode ID 77018163 - 172.16.0.1/12
+-e ⚠️ [INFO] No VLAN IPs found for Linode ID 77146722
+-e ✅ [SUCCESS] VLAN IPs found for Linode ID 77020222 - 172.16.1.10/12
+-e ⚠️ [INFO] No VLAN IPs found for Linode ID 77146725
+-e ⚠️ [INFO] No VLAN IPs found for Linode ID 77146723

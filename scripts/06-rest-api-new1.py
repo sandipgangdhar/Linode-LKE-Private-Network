@@ -13,7 +13,6 @@ import asyncio
 import aiohttp
 import psutil
 import signal
-import configparser
 
 app = Flask(__name__)
 CORS(app)
@@ -169,50 +168,32 @@ def api_request_with_retry(url, headers, retries=3, backoff=2):
     log(f"[ERROR] API call failed after {retries} attempts.")
     return None
 
-def fetch_linode_token(config_file='/root/.linode-cli/linode-cli'):
-    """
-    Read the Linode CLI config file and extract the token for the default user.
-    
-    Args:
-        config_file (str): Path to the Linode CLI configuration file
-    
-    Returns:
-        str: The token value, or None if not found
-    """
-    # Check if the file exists
-    if not os.path.exists(config_file):
-        print(f"Error: Configuration file {config_file} not found")
-        return None
-    
-    # Initialize config parser
-    config = configparser.ConfigParser()
-    
+def fetch_linode_token():
+    LINODE_CLI_CONFIG = os.getenv("LINODE_CLI_CONFIG", "/root/.linode-cli/linode-cli")
     try:
-        # Read the configuration file
-        config.read(config_file)
-        
-        # Get the default user from the [DEFAULT] section
-        if 'DEFAULT' not in config or 'default-user' not in config['DEFAULT']:
-            print(f"Error: No default-user found in {config_file}")
-            return None
-        
-        default_user = config['DEFAULT']['default-user']
-        
-        # Check if the user section exists
-        if default_user not in config:
-            print(f"Error: User profile '{default_user}' not found in {config_file}")
-            return None
-        
-        # Extract the token
-        token = config[default_user].get('token')
-        if not token:
-            print(f"Error: No token found for user '{default_user}' in {config_file}")
-            return None
-            
-        return token
-    
+        with open(LINODE_CLI_CONFIG, "r") as f:
+            for line in f:
+                if "token" in line:
+                    token = line.split('= ')[1].strip()
+                    log(f"[DEBUG] Linode Token fetched successfully")
+                    headers = {"Authorization": f"Bearer {token}"}
+                    response = requests.get("https://api.linode.com/v4/account", headers=headers, timeout=5)
+                    if response.status_code == 200:
+                        log(f"[DEBUG] Linode Token validated successfully")
+                        return token
+                    else:
+                        log(f"[ERROR] Token validation failed with status {response.status_code}")
+                        return None
+        log(f"[ERROR] Token not found in {LINODE_CLI_CONFIG}")
+        return None
+    except FileNotFoundError:
+        log(f"[ERROR] Linode config file {LINODE_CLI_CONFIG} not found")
+        return None
+    except requests.RequestException as e:
+        log(f"[ERROR] Network error during token validation: {str(e)}")
+        return None
     except Exception as e:
-        print(f"Error reading configuration file: {str(e)}")
+        log(f"[ERROR] Exception while fetching Linode token: {str(e)}")
         return None
 
 def remove_duplicates():
@@ -313,9 +294,6 @@ def system_health_check():
         return False
     return True
 
-# =======================
-# 🟢 Allocate IP Endpoint
-# =======================
 @app.route('/allocate', methods=['POST'])
 def allocate_ip():
     try:
@@ -416,43 +394,6 @@ def allocate_ip():
         log(f"[ERROR] Unexpected error in /allocate endpoint: {str(e)}")
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
-
-# =======================
-# 🔴 Release IP Endpoint
-# =======================
-@app.route('/release', methods=['POST'])
-def release_ip():
-    try:
-        ip_address = request.json.get('ip_address')
-        if not ip_address:
-            return jsonify({"error": "IP address not provided"}), 400
-
-        ip_address = ip_address.strip()
-
-        with open(IP_FILE_PATH, 'r') as f:
-            ip_list = [line.strip() for line in f.read().splitlines() if line.strip()]
-
-        if not ip_list:
-            return jsonify({"error": "IP list is empty"}), 500
-
-        # Determine reserved IPs (first two and last one)
-        reserved_ips = set(ip_list[:2] + ip_list[-1:])
-
-        if ip_address in reserved_ips:
-            return jsonify({"error": f"IP address {ip_address} is reserved and cannot be released."}), 403
-
-        if ip_address in ip_list:
-            ip_list.remove(ip_address)
-            with open(IP_FILE_PATH, 'w') as f:
-                f.write("\n".join(ip_list) + "\n")
-            return jsonify({"status": "IP released", "ip": ip_address}), 200
-        else:
-            return jsonify({"error": f"IP address {ip_address} not found in the allocation list."}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-# =======================
-# 🔵 Health Check Endpoint
-# =======================
 @app.route('/health', methods=['GET'])
 def health_check():
     try:
@@ -520,9 +461,6 @@ def health_check():
         log(f"[ERROR] Health check: Unexpected error: {str(e)}")
         return jsonify({"status": "unhealthy", "error": f"Unexpected error: {str(e)}"}), 500
 
-# =======================
-# 🚀 Start Flask Application
-# =======================
 if __name__ == '__main__':
     validate_environment()
     app.run(host='0.0.0.0', port=8080, debug=True)

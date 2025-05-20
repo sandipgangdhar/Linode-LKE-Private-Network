@@ -1,25 +1,78 @@
+# 07-vlan-manager-daemonset.yaml
+# 
+# This YAML file defines the DaemonSet for the VLAN Manager in Linode LKE.
+# It provisions a VLAN attachment on each worker node and manages the IP
+# routing through configured scripts. This DaemonSet ensures that each node
+# is correctly attached to the VLAN and ready for internal communication.
+# 
+# -----------------------------------------------------
+# 📝 Parameters:
+# 
+# 1️⃣ hostNetwork          - Allows direct network access for VLAN configuration.
+# 2️⃣ dnsPolicy            - Configures DNS policy for host networking.
+# 3️⃣ serviceAccountName   - Uses RBAC to manage VLAN and Linode configurations.
+# 4️⃣ image                - Docker image for executing the VLAN scripts.
+# 5️⃣ command & args       - Shell commands to install dependencies and run scripts.
+# 6️⃣ volumeMounts         - Mount paths for scripts and configuration files.
+# 7️⃣ env                  - Environment variables fetched from ConfigMaps.
+# 
+# -----------------------------------------------------
+# 🔄 Usage:
+# 
+# - This DaemonSet is deployed on every worker node in the cluster.
+# - It configures VLAN attachment and IP routing through Linode CLI.
+# - Dependencies are installed during initialization to ensure smooth execution.
+# 
+# -----------------------------------------------------
+# 📌 Best Practices:
+# 
+# - Ensure that the "vlan-manager-scripts" ConfigMap is correctly configured.
+# - Use security context for privileged operations.
+# - Monitor logs for dependency installation and VLAN attachment.
+# - Validate kubeconfig before executing Kubernetes commands.
+# 
+# -----------------------------------------------------
+# 🖋️ Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+# 
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
+  # Name and namespace for the DaemonSet
   name: vlan-manager
   namespace: kube-system
+
 spec:
+  # Selector for pod matching
   selector:
     matchLabels:
       app: vlan-manager
+
   template:
     metadata:
       labels:
         app: vlan-manager
+
     spec:
+      # Enable host network for direct VLAN configuration
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+
+      # Use the service account with required RBAC permissions
       serviceAccountName: vlan-manager-sa
+
       containers:
         - name: vlan-manager
           image: python:3.9
+
+          # Security context to allow privileged VLAN operations
           securityContext:
             privileged: true
+
+          # Command and Arguments
           command: ["/bin/bash", "-c"]
           args: 
             - |
@@ -29,15 +82,18 @@ spec:
               apt-get update && \
               apt-get install -y jq apt-transport-https ca-certificates curl net-tools iproute2 && \
               echo "✅ Dependencies installed successfully."
-              # === Check Installation ===
+
+              # === Validate Installation ===
               if ! command -v ip &> /dev/null; then
                   echo "❌ ip command not found. Installation failed."
                   exit 1
               fi
+
               if ! command -v ifconfig &> /dev/null; then
                   echo "❌ net-tools package not found. Installation failed."
                   exit 1
               fi
+
               if ! command -v jq &> /dev/null; then
                   echo "❌ jq command not found. Installation failed."
                   exit 1
@@ -62,7 +118,8 @@ spec:
               fi
               pip install linode-cli && \
               echo "✅ Linode CLI installed successfully."
-              # === Check Installation ===
+
+              # === Validate Installation ===
               if ! command -v linode-cli &> /dev/null; then
                   echo "❌ linode-cli command not found. Installation failed."
                   exit 1
@@ -112,6 +169,8 @@ spec:
               /tmp/02-script-vlan-attach.sh
               echo "🛌 Script execution complete. Sleeping indefinitely..."
               sleep infinity
+
+          # Environment variables
           env:
             - name: SUBNET
               valueFrom:
@@ -143,10 +202,13 @@ spec:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: LINODE_CLI_CONFIG
+
+          # Volume mounts for scripts
           volumeMounts:
             - name: vlan-manager-scripts
               mountPath: /root/scripts
 
+      # Volumes to be mounted
       volumes:
         - name: vlan-manager-scripts
           configMap:

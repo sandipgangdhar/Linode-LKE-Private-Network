@@ -1,18 +1,56 @@
+# 02-script-vlan-attach.sh
+# 
+# This shell script handles the attachment of a VLAN interface to a Linode instance
+# running in a Kubernetes environment. It configures IP addresses, VLAN labels,
+# and routing information to enable communication across the VLAN.
+# 
+# -----------------------------------------------------
+# 📝 Parameters:
+# 
+# 1️⃣ SUBNET              - The subnet for VLAN IP assignments.
+# 2️⃣ ROUTE_IP            - Gateway IP for the primary subnet.
+# 3️⃣ VLAN_LABEL          - VLAN identifier for Linode.
+# 4️⃣ DEST_SUBNET         - Destination subnet for static routing.
+# 
+# -----------------------------------------------------
+# 🔄 Usage:
+# 
+# - This script is executed as part of the DaemonSet startup.
+# - It checks if the VLAN is attached to the instance and configures routing.
+# - If the VLAN is not attached, it handles the attachment using Linode CLI.
+# 
+# -----------------------------------------------------
+# 📌 Best Practices:
+# 
+# - Ensure proper RBAC permissions for `linode-cli` to execute API commands.
+# - Monitor the logs for successful attachment and routing configuration.
+# - Handle edge cases where VLAN or subnet configurations might fail.
+# 
+# -----------------------------------------------------
+# 🖋️ Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+# 
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
 #!/bin/bash
 
 # === Exit on error ===
 set -e
 
 # === Environment Variables ===
+# These variables are populated from Kubernetes ConfigMap or environment
 SUBNET="${SUBNET}"
 ROUTE_IP="${ROUTE_IP}"
 VLAN_LABEL="${VLAN_LABEL}"
 DEST_SUBNET="${DEST_SUBNET}"
 
-# === Logging function ===
+# === Function to Log Events ===
+# This function logs events with a timestamp
 log() {
     echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
 }
+
+log "🔄 Starting VLAN Attachment Script..."
 
 # === Function to check if VLAN is already attached ===
 is_vlan_attached() {
@@ -53,19 +91,33 @@ push_route() {
     fi
 }
 
-# === Discover Linode Information ===
-NODE_IP=$(ip addr show eth0 | grep 'inet ' | awk '{print $2}' | grep '^192\.' | cut -d/ -f1)
+# === Discover Node IP and Name ===
+# Retrieve the IP address of eth0 (assumed to be the main interface)
+log "🌐 Fetching NODE IP of the instance..."
+NODE_IP=$(ip addr show eth0 | grep -v "eth0:[0-9]" | grep -w inet | awk {'print $2'}|awk -F'/' {'print $1'})
+
+log "🌐 Node IP: $NODE_IP"
+
+# Query Kubernetes to find the node name associated with this IP
+log "🌐 Fetching NODE NAME of the instance..."
 NODE_NAME=$(kubectl get nodes -o json | jq -r '.items[] | select(.status.addresses[]?.address == "'"$NODE_IP"'") | .metadata.name')
 
+log "🌐 Node Name: $NODE_NAME"
+
+# === Fetch Public IP of the Node ===
+# This fetches the public IP associated with the node from the Kubernetes API
 log "🌐 Fetching Public IP of the instance..."
 PUBLIC_IP=$(kubectl get node $NODE_NAME -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}' | awk {'print $1'})
+log "🌐 Public IP of the Node: $PUBLIC_IP"
 
 export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
 
-log "🔍 Discovering Linode ID for IP $PUBLIC_IP..."
+# === Discover Linode ID and Configuration ID ===
+# Linode API calls to find the instance ID and its configuration ID
 LINODE_ID=$(linode-cli linodes list --json | jq -r ".[] | select(.ipv4[] | contains(\"$PUBLIC_IP\")) | .id")
 CONFIG_ID=$(linode-cli linodes configs-list $LINODE_ID --json | jq -r '.[0].id')
 
+# If either the Linode ID or Config ID is not found, retry after 60 seconds
 if [ -z "$LINODE_ID" ] || [ -z "$CONFIG_ID" ]; then
     log "❌ Failed to retrieve Linode ID or Config ID. Sleeping for 60 seconds and retrying..."
     sleep 60
