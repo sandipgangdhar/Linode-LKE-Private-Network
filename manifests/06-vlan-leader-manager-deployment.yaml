@@ -1,35 +1,154 @@
+# 06-vlan-leader-manager-deployment.yaml
+# 
+# This YAML file defines the Deployment and Service for the VLAN Leader Manager
+# in Linode LKE. It sets up a Flask-based REST API (`06-rest-api.py`) to manage
+# VLAN IP allocations and releases. The API is exposed as a ClusterIP service.
+# 
+# -----------------------------------------------------
+# 📝 Parameters:
+# 
+# 1️⃣ replicas              - The number of pod replicas to deploy.
+# 2️⃣ serviceAccountName    - The ServiceAccount with RBAC permissions.
+# 3️⃣ image                 - Docker image used to run the Flask app.
+# 4️⃣ command & args        - Shell commands to initialize Flask and scripts.
+# 5️⃣ volumeMounts          - Mount paths for scripts and VLAN IP storage.
+# 6️⃣ ports                 - Port exposure configuration for the service.
+# 
+# -----------------------------------------------------
+# 🔄 Usage:
+# 
+# - This Deployment initializes the Flask API, mounts necessary scripts, and
+#   connects to the VLAN IP storage for dynamic IP management.
+# - The API is exposed using a Kubernetes `Service` of type `ClusterIP`.
+# 
+# -----------------------------------------------------
+# 📌 Best Practices:
+# 
+# - Ensure the `vlan-manager-scripts` and `vlan-ip-pvc` are correctly configured.
+# - Use liveness and readiness probes for better health checks.
+# - Avoid hardcoded IPs; use environment variables or ConfigMaps.
+# 
+# -----------------------------------------------------
+# 🖋️ Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+# 
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  # Name and namespace for the deployment
   name: vlan-leader-manager
   namespace: kube-system
+
+
 spec:
+  # Number of replicas to maintain
   replicas: 1
+
+
   selector:
     matchLabels:
       app: vlan-leader-manager
+
   template:
     metadata:
       labels:
         app: vlan-leader-manager
+
     spec:
+      # Service account with necessary RBAC permissions
       serviceAccountName: vlan-manager-sa
       containers:
         - name: vlan-leader-manager
           image: python:3.9
+
+          # Command to run the Flask API
           command: ["/bin/bash", "-c"]
           args: 
             - |
-              pip install flask flask-cors && \
+
+              # === Install Python dependencies ===
+              pip install --upgrade pip && \
+              # === Check Installation ===
+              if ! command -v pip &> /dev/null; then
+                  echo "❌ pip command not found. Installation failed."
+                  exit 1
+              fi
+              pip install linode-cli && \
+              echo "✅ Linode CLI installed successfully."
+
+
+              # === Install System dependencies ===
+              apt-get update && apt-get install -y jq curl parallel net-tools&& \
+              echo "✅ Dependencies installed successfully."
+
+
+              # === Validate Installation ===
+              if ! command -v linode-cli &> /dev/null; then
+                  echo "❌ linode-cli command not found. Installation failed."
+                  exit 1
+              fi
+
+              # === Configure Linode CLI ===
+              mkdir -p /root/.linode-cli && \
+              echo "$LINODE_CLI_CONFIG" > /root/.linode-cli/linode-cli && \
+              chmod 600 /root/.linode-cli/* && \
+              export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli" && \
+              echo "✅ Linode CLI configuration completed."
+
+              # Install Flask and Flask-CORS
+              pip install flask flask-cors requests filelock aiohttp psutil && \
+
+              # Copy the script and prepare it for execution
               cp --dereference /root/scripts/06-rest-api.py /tmp/06-rest-api.py && \
               chmod u+x /tmp/06-rest-api.py && \
+
+              # Start the Flask application and log to file
               exec python3 /tmp/06-rest-api.py > /tmp/flask.log 2>&1
+
+          # Environment variables
+          env:
+            - name: LINODE_CLI_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: LINODE_CLI_CONFIG
+            - name: LINODE_TOKEN
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: LINODE_API_KEY
+            - name: REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: REGION
+
+          # Mounting necessary scripts and VLAN IP storage
           volumeMounts:
             - name: vlan-manager-scripts
               mountPath: /root/scripts
             - name: vlan-ip-storage
               mountPath: /mnt/vlan-ip
 
+          # Suggested Liveness and Readiness probes (Optional but recommended)
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+      # Define the volumes to be mounted
       volumes:
         - name: vlan-manager-scripts
           configMap:
@@ -37,17 +156,23 @@ spec:
         - name: vlan-ip-storage
           persistentVolumeClaim:
             claimName: vlan-ip-pvc
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
+  # Name and namespace for the service
   name: vlan-leader-service
   namespace: kube-system
+
 spec:
   selector:
     app: vlan-leader-manager
+
   ports:
     - protocol: TCP
       port: 8080
       targetPort: 8080
+
+# Service type for internal communication
   type: ClusterIP

@@ -1,7 +1,56 @@
+# 01-linode-storageclass.yaml
+# 
+# This YAML file defines a Kubernetes StorageClass for Linode Block Storage.
+# It specifies how dynamic provisioning of PersistentVolumes (PVs) should occur
+# for applications requiring persistent storage in the Linode infrastructure.
+# 
+# -----------------------------------------------------
+# 📝 Parameters:
+# 
+# 1️⃣ name                  - The name of the StorageClass.
+# 2️⃣ provisioner           - The CSI driver for Linode Block Storage.
+# 3️⃣ reclaimPolicy         - Determines what happens to the volume after its release.
+#                            - 'Retain' means the volume is not deleted after release.
+# 4️⃣ volumeBindingMode     - Controls when the PersistentVolume is provisioned.
+#                            - 'Immediate' means it is created as soon as it is requested.
+# 
+# -----------------------------------------------------
+# 🔄 Usage:
+# 
+# - This StorageClass is used by PersistentVolumeClaims (PVCs) to dynamically
+#   create block storage volumes in Linode.
+# - Any PVC that specifies 'linode-block-storage' as its storage class will
+#   provision a new Linode Block Storage volume automatically.
+# 
+# -----------------------------------------------------
+# 📌 Best Practices:
+# 
+# - For production, consider using 'Delete' as reclaimPolicy to prevent
+#   orphaned volumes if you don't need data persistence.
+# - For mission-critical data, snapshot backups are recommended.
+# 
+# -----------------------------------------------------
+# 🖋️ Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+# 
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
+---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
+  # Name of the StorageClass used for PVC binding
   name: linode-block-storage
+
+# Linode CSI driver for block storage provisioning
 provisioner: linodebs.csi.linode.com
+
+# Determines what happens to the volume when the claim is deleted
+# Retain: The volume is kept after PVC deletion
+# Delete: The volume is deleted with the PVC
 reclaimPolicy: Retain
+
+# Controls when the PersistentVolume is created
+# Immediate: The PV is created as soon as the PVC is made
+# WaitForFirstConsumer: The PV is created only when it is bound
 volumeBindingMode: Immediate

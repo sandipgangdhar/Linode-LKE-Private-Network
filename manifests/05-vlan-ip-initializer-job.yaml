@@ -1,10 +1,54 @@
+# 05-vlan-ip-initializer-job.yaml
+# 
+# This YAML file defines a Kubernetes Job to initialize the IP list
+# for the VLAN Manager in Linode LKE. It creates the list of available
+# IPs in the specified subnet by executing the initialization script
+# `05-script-ip-list-initialize.sh`.
+# 
+# -----------------------------------------------------
+# 📝 Parameters:
+# 
+# 1️⃣ SUBNET              - The subnet from which IPs are initialized.
+# 2️⃣ image               - Docker image used to run the initialization script.
+# 3️⃣ command             - Bash command to execute the script.
+# 4️⃣ args                - Arguments for the script, including the subnet.
+# 5️⃣ volumeMounts        - Mounts PersistentVolumeClaims (PVC) and ConfigMaps.
+# 6️⃣ lifecycle Hooks     - Defines PostStart and PreStop behaviors.
+# 
+# -----------------------------------------------------
+# 🔄 Usage:
+# 
+# - This Job is triggered to create an IP list when the VLAN Manager is
+#   initialized in Linode LKE.
+# - The generated IP list is stored in a Persistent Volume (PVC) and used by
+#   the VLAN Manager for allocation.
+# 
+# -----------------------------------------------------
+# 📌 Best Practices:
+# 
+# - Ensure the PersistentVolumeClaim (PVC) is properly mounted.
+# - Validate that `/mnt/vlan-ip` is writable before execution.
+# - Regularly check the logs for any initialization failures.
+# - PostStart and PreStop hooks are used for better lifecycle management.
+# 
+# -----------------------------------------------------
+# 🖋️ Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+# 
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
+  # Name and namespace for the job
   name: vlan-ip-initializer
   namespace: kube-system
+
 spec:
+  # Job automatically cleaned up 60 seconds after completion
   ttlSecondsAfterFinished: 60
+
   template:
     metadata:
       name: vlan-ip-initializer
@@ -12,25 +56,55 @@ spec:
       containers:
       - name: vlan-ip-initializer
         image: ubuntu:latest
+        # Command and Arguments
         command: ["/bin/bash", "-c"]
-        args: ["
-          mkdir -p /mnt/vlan-ip && \
-          apt-get update && apt-get install -y python3 && \
-          cp /root/scripts/05-script-ip-list-initialize.sh /mnt/vlan-ip/ && \
-          chmod +x /mnt/vlan-ip/05-script-ip-list-initialize.sh && \
-          /mnt/vlan-ip/05-script-ip-list-initialize.sh $SUBNET
-        "]
+        args:
+          - |
+            mkdir -p /mnt/vlan-ip && \
+            export DEBIAN_FRONTEND=noninteractive && \
+            apt-get update && apt-get install -y python3 jq curl parallel && \
+            echo "✅ Dependencies installed successfully."
+
+            # === Configure Linode CLI ===
+            mkdir -p /root/.linode-cli && \
+            echo "$LINODE_CLI_CONFIG" > /root/.linode-cli/linode-cli && \
+            chmod 600 /root/.linode-cli/* && \
+            export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli" && \
+            echo "✅ Linode CLI configuration completed."
+
+            cp /root/scripts/05-script-ip-list-initialize.sh /mnt/vlan-ip/ && \
+            chmod +x /mnt/vlan-ip/05-script-ip-list-initialize.sh && \
+            /mnt/vlan-ip/05-script-ip-list-initialize.sh $SUBNET $REGION
+        # Environment variable for subnet
         env:
         - name: SUBNET
           valueFrom:
             configMapKeyRef:
               name: vlan-manager-config
-              key: SUBNET 
+              key: SUBNET
+        - name: REGION
+          valueFrom:
+            configMapKeyRef:
+              name: vlan-manager-config
+              key: REGION
+        - name: LINODE_TOKEN
+          valueFrom:
+            configMapKeyRef:
+              name: vlan-manager-config
+              key: LINODE_API_KEY
+        - name: LINODE_CLI_CONFIG
+          valueFrom:
+            configMapKeyRef:
+              name: vlan-manager-config
+              key: LINODE_CLI_CONFIG
+        # Volume mounts for persistence and script access
         volumeMounts:
         - name: vlan-ip-pv
           mountPath: /mnt/vlan-ip
         - name: vlan-manager-scripts
           mountPath: /root/scripts
+
+        # Lifecycle hooks for better management
         lifecycle:
           postStart:
             exec:
@@ -38,11 +112,17 @@ spec:
           preStop:
             exec:
               command: ["/bin/bash", "-c", "umount /mnt/vlan-ip && echo 'Volume Unmounted successfully.'"]
+
+        # Security context to run with elevated permissions
         securityContext:
           privileged: true
           runAsUser: 0
           runAsGroup: 0          
+
+      # Job should not restart if it fails
       restartPolicy: Never
+
+      # Define Persistent Volumes
       volumes:
       - name: vlan-ip-pv
         persistentVolumeClaim:
@@ -50,4 +130,6 @@ spec:
       - name: vlan-manager-scripts
         configMap:
           name: vlan-manager-scripts
+
+  # Retry limit for the job
   backoffLimit: 3

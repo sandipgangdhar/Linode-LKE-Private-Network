@@ -1,12 +1,54 @@
+# 01-script-leader-election.sh
+# 
+# This shell script handles leader election among VLAN manager instances
+# running in a Linode LKE cluster. It determines which instance is the leader
+# responsible for managing VLAN IP assignments and coordination.
+# 
+# -----------------------------------------------------
+# 📝 Parameters:
+# 
+# 1️⃣ LEADER_FILE            - File path to store leader identity.
+# 2️⃣ NODE_NAME              - The name of the current node.
+# 3️⃣ NAMESPACE              - Kubernetes namespace where the pods are running.
+# 4️⃣ APP_LABEL              - Label selector to find all relevant pods.
+# 
+# -----------------------------------------------------
+# 🔄 Usage:
+# 
+# - This script is executed as part of the DaemonSet startup.
+# - It checks the list of running pods, sorts by name, and elects the first
+#   alphabetically as the leader.
+# - If the node is the leader, it writes its identity to the LEADER_FILE.
+# 
+# -----------------------------------------------------
+# 📌 Best Practices:
+# 
+# - Ensure the namespace and labels are configured correctly in the DaemonSet.
+# - Monitor the logs to verify proper leader election and failover.
+# - Use health checks to verify the leader's status before critical operations.
+# 
+# -----------------------------------------------------
+# 🖋️ Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+# 
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
 #!/bin/bash
 
-# Configuration
+# === Environment Variables ===
 NAMESPACE="kube-system"
 POD_NAME=$(hostname)
 LEADER_ANNOTATION="vlan-manager-leader"
 LOCK_DURATION="30s"
 FLASK_APP=/root/scripts/06-rest-api.py
 FLASK_RUN_PORT=8080
+
+# === Function to Log Events ===
+log() {
+    echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
+}
+
+log "🔄 Starting Leader Election Process..."
 
 # Function to check leadership
 is_leader() {
