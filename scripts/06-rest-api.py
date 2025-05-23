@@ -1,3 +1,4 @@
+# Import necessary libraries for web server, concurrency, networking, and file handling
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
@@ -15,29 +16,45 @@ import psutil
 import signal
 import configparser
 
+# Initialize Flask application instance
 app = Flask(__name__)
+# Enable Cross-Origin Resource Sharing (CORS) for this Flask app
 CORS(app)
 
-# File paths
+# Define the path to the IP address allocation list file
 IP_FILE_PATH = "/mnt/vlan-ip/vlan-ip-list.txt"
+
+# Define the log file path for logging allocation and healthcheck events
 LOG_FILE = "/tmp/allocate-ip.log"
+
+# Maximum number of log lines to retain in the log file
 MAX_LOG_LINES = 1000
+
+# Maximum backoff time in seconds for retry loops (e.g., API retries)
 MAX_BACKOFF = 60
+
+# Default region list used if API-based region fetch fails
 FALLBACK_REGIONS = ['us-east', 'us-west', 'in-maa', 'eu-west', 'eu-central']
 
+# Cache dictionary to store VLAN IPs with a TTL for performance
 VLAN_IP_CACHE = {
     "ips": None,
     "timestamp": None,
     "ttl_seconds": int(os.getenv("CACHE_TTL_SECONDS", 60))
 }
+
+# Cache to validate region metadata to reduce repetitive API calls
 REGION_CACHE = {"valid": False, "timestamp": None, "ttl_seconds": 3600}
 
-# Signal handlers for graceful shutdown
+# Signal handler to gracefully shutdown the app when terminated
 def graceful_exit(signalnum, frame):
     log(f"[INFO] Received signal {signalnum}. Shutting down gracefully...")
     sys.exit(0)
 
+# Register signal handlers for SIGTERM and SIGINT (Ctrl+C)
 signal.signal(signal.SIGTERM, graceful_exit)
+
+# Register signal handlers for SIGTERM and SIGINT (Ctrl+C)
 signal.signal(signal.SIGINT, graceful_exit)
 
 # Async region fetching
@@ -56,10 +73,12 @@ async def fetch_regions_async(headers, retries=3, backoff=2):
                     else:
                         log(f"[WARN] API call failed with status {response.status}. Retrying in {backoff} seconds...")
                         await asyncio.sleep(backoff)
+                        # Maximum backoff time in seconds for retry loops (e.g., API retries)
                         backoff = min(backoff * 2, MAX_BACKOFF)
             except aiohttp.ClientError as e:
                 log(f"[ERROR] Network error during async API call: {str(e)}. Retrying in {backoff} seconds...")
                 await asyncio.sleep(backoff)
+                # Maximum backoff time in seconds for retry loops (e.g., API retries)
                 backoff = min(backoff * 2, MAX_BACKOFF)
         log("[ERROR] Failed to fetch regions after retries")
         return None
@@ -70,8 +89,11 @@ async def update_regions_cache():
         headers = {"Authorization": f"Bearer {linode_token}"}
         regions = await fetch_regions_async(headers)
         if regions:
+            # Default region list used if API-based region fetch fails
             global FALLBACK_REGIONS
+            # Default region list used if API-based region fetch fails
             FALLBACK_REGIONS = regions
+            # Default region list used if API-based region fetch fails
             log(f"[INFO] Updated fallback regions: {FALLBACK_REGIONS}")
 
 async def schedule_region_updates():
@@ -86,6 +108,7 @@ def validate_environment():
         errors.append("REGION environment variable not set")
     else:
         linode_token = fetch_linode_token()
+        # Default region list used if API-based region fetch fails
         valid_regions = FALLBACK_REGIONS
         if linode_token:
             headers = {"Authorization": f"Bearer {linode_token}"}
@@ -98,10 +121,12 @@ def validate_environment():
         if REGION not in valid_regions:
             errors.append(f"Invalid region: {REGION}. Valid regions: {valid_regions}")
     
+    # Define the path to the IP address allocation list file
     ip_dir = os.path.dirname(IP_FILE_PATH)
     if not os.access(ip_dir, os.W_OK):
         errors.append(f"No write permission for directory {ip_dir}")
     
+    # Define the log file path for logging allocation and healthcheck events
     log_dir = os.path.dirname(LOG_FILE)
     if not os.access(log_dir, os.W_OK):
         errors.append(f"No write permission for directory {log_dir}")
@@ -119,14 +144,19 @@ def validate_environment():
 def log(message):
     print(message)
     sys.stdout.flush()
+    # Define the log file path for logging allocation and healthcheck events
     with FileLock(LOG_FILE + ".lock"):
         try:
             lines = []
+            # Define the log file path for logging allocation and healthcheck events
             if os.path.exists(LOG_FILE):
+                # Define the log file path for logging allocation and healthcheck events
                 with open(LOG_FILE, "r") as f:
                     lines = f.read().splitlines()
             lines.append(message)
+            # Maximum number of log lines to retain in the log file
             lines = lines[-MAX_LOG_LINES:]
+            # Define the log file path for logging allocation and healthcheck events
             with open(LOG_FILE, "w") as f:
                 f.write("\n".join(lines) + "\n")
         except Exception as e:
@@ -149,22 +179,27 @@ def api_request_with_retry(url, headers, retries=3, backoff=2):
             elif response.status_code >= 500:
                 log(f"[WARN] Server error {response.status_code}. Retrying in {backoff} seconds...")
                 time.sleep(backoff)
+                # Maximum backoff time in seconds for retry loops (e.g., API retries)
                 backoff = min(backoff * 2, MAX_BACKOFF)
             else:
                 log(f"[WARN] API call failed with status {response.status_code}. Retrying in {backoff} seconds...")
                 time.sleep(backoff)
+                # Maximum backoff time in seconds for retry loops (e.g., API retries)
                 backoff = min(backoff * 2, MAX_BACKOFF)
         except requests.ConnectionError as e:
             log(f"[ERROR] Connection error during API call: {str(e)}. Retrying in {backoff} seconds...")
             time.sleep(backoff)
+            # Maximum backoff time in seconds for retry loops (e.g., API retries)
             backoff = min(backoff * 2, MAX_BACKOFF)
         except requests.Timeout as e:
             log(f"[ERROR] Timeout during API call: {str(e)}. Retrying in {backoff} seconds...")
             time.sleep(backoff)
+            # Maximum backoff time in seconds for retry loops (e.g., API retries)
             backoff = min(backoff * 2, MAX_BACKOFF)
         except requests.RequestException as e:
             log(f"[ERROR] Other network error during API call: {str(e)}. Retrying in {backoff} seconds...")
             time.sleep(backoff)
+            # Maximum backoff time in seconds for retry loops (e.g., API retries)
             backoff = min(backoff * 2, MAX_BACKOFF)
     log(f"[ERROR] API call failed after {retries} attempts.")
     return None
