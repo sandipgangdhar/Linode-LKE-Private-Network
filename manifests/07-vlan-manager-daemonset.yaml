@@ -207,7 +207,16 @@ spec:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: ENABLE_PUSH_ROUTE
-
+            - name: ENABLE_FIREWALL
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: ENABLE_FIREWALL
+            - name: LKE_CLUSTER_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: LKE_CLUSTER_ID
           # Volume mounts for scripts
           volumeMounts:
             - name: vlan-manager-scripts
