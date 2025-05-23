@@ -202,6 +202,11 @@ spec:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: LINODE_CLI_CONFIG
+            - name: ENABLE_PUSH_ROUTE
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: ENABLE_PUSH_ROUTE
 
           # Volume mounts for scripts
           volumeMounts:

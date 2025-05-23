@@ -43,6 +43,7 @@ SUBNET="${SUBNET}"
 ROUTE_IP="${ROUTE_IP}"
 VLAN_LABEL="${VLAN_LABEL}"
 DEST_SUBNET="${DEST_SUBNET}"
+ENABLE_PUSH_ROUTE="${ENABLE_PUSH_ROUTE}"  # flag to control route pushing
 
 # === Function to Log Events ===
 # This function logs events with a timestamp
@@ -64,30 +65,56 @@ is_vlan_attached() {
 
 # === Function to push the route ===
 push_route() {
-    log "Checking if route already exists for $DEST_SUBNET..."
-    
-    # Temporarily disable exit-on-error
-    set +e
-    ip route show | grep -q "$DEST_SUBNET"
-    STATUS=$?
-    set -e
-    
-    if [ $STATUS -eq 0 ]; then
-        log "✅ Route $DEST_SUBNET already exists. Skipping addition."
-    else
-        log "⚙️  Adding route $DEST_SUBNET via $ROUTE_IP on eth1..."
-        
-        # Attempt to add the route
-        set +e
-        ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev eth1
-        ADD_STATUS=$?
-        set -e
+    if [[ "$ENABLE_PUSH_ROUTE" == "true" ]]; then
 
-        if [ $ADD_STATUS -eq 0 ]; then
-            log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to eth1."
-        else
-            log "⚠️  Failed to add route $DEST_SUBNET via $ROUTE_IP. It may already exist."
+        # === Route Push Validation Logic ===
+        # This block conditionally validates routing variables only if route pushing is enabled.
+        #
+        # - ENABLE_PUSH_ROUTE: If set to "true", the script will attempt to push a static route.
+        # - ROUTE_IP and DEST_SUBNET must be set with valid non-placeholder values if ENABLE_PUSH_ROUTE is true.
+        #
+        # If ENABLE_PUSH_ROUTE is "false" (default), this block is skipped entirely and
+        # ROUTE_IP / DEST_SUBNET are ignored.
+        #
+        # Note: Even if ignored, placeholder values like "0.0.0.0" should be provided in the ConfigMap
+        #       to maintain Kubernetes YAML consistency.
+
+        if [[ -z "$ROUTE_IP" || "$ROUTE_IP" == "0.0.0.0" || -z "$DEST_SUBNET" || "$DEST_SUBNET" == "0.0.0.0/0" ]]; then
+            log "❌ ENABLE_PUSH_ROUTE is true, but ROUTE_IP or DEST_SUBNET is unset or invalid."
+            log "🛑 Skipping route push and sleeping indefinitely to avoid container crash loop."
+            sleep infinity
         fi
+        log "📦 ENABLE_PUSH_ROUTE value is: $ENABLE_PUSH_ROUTE"
+        log "📦 ROUTE_IP value is: $ROUTE_IP"
+        log "📦 DEST_SUBNET value is: $DEST_SUBNET"
+
+        log "Checking if route already exists for $DEST_SUBNET..."
+    
+        # Temporarily disable exit-on-error
+        set +e
+        ip route show | grep -q "$DEST_SUBNET"
+        STATUS=$?
+        set -e
+        
+        if [ $STATUS -eq 0 ]; then
+            log "✅ Route $DEST_SUBNET already exists. Skipping addition."
+        else
+            log "⚙️  Adding route $DEST_SUBNET via $ROUTE_IP on eth1..."
+            
+            # Attempt to add the route
+            set +e
+            ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev eth1
+            ADD_STATUS=$?
+            set -e
+    
+            if [ $ADD_STATUS -eq 0 ]; then
+                log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to eth1."
+            else
+                log "⚠️  Failed to add route $DEST_SUBNET via $ROUTE_IP. It may already exist."
+            fi
+        fi
+    else
+        log "ℹ️ Skipping route push as ENABLE_PUSH_ROUTE is set to false."
     fi
 }
 
