@@ -60,21 +60,27 @@ spec:
         command: ["/bin/bash", "-c"]
         args:
           - |
+            set -e
+            echo "[DEBUG] Exporting environment variables..."
+            echo "[DEBUG] ENV SUBNET=$SUBNET REGION=$REGION"
+        
             mkdir -p /mnt/vlan-ip && \
-            export DEBIAN_FRONTEND=noninteractive && \
-            apt-get update && apt-get install -y python3 jq curl parallel && \
-            echo "✅ Dependencies installed successfully."
-
-            # === Configure Linode CLI ===
+            apt-get update && \
+            DEBIAN_FRONTEND=noninteractive apt-get install -y python3 jq curl parallel ca-certificates && \
+            curl -L https://github.com/etcd-io/etcd/releases/download/v3.5.12/etcd-v3.5.12-linux-amd64.tar.gz -o etcd.tar.gz && \
+            tar xzf etcd.tar.gz --strip-components=1 -C /usr/local/bin etcd-v3.5.12-linux-amd64/etcdctl && \
+            chmod +x /usr/local/bin/etcdctl && \
+            echo "✅ etcdctl installed."
+        
             mkdir -p /root/.linode-cli && \
             echo "$LINODE_CLI_CONFIG" > /root/.linode-cli/linode-cli && \
             chmod 600 /root/.linode-cli/* && \
-            export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli" && \
-            echo "✅ Linode CLI configuration completed."
-
+            export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
+        
             cp /root/scripts/05-script-ip-list-initialize.sh /mnt/vlan-ip/ && \
             chmod +x /mnt/vlan-ip/05-script-ip-list-initialize.sh && \
-            /mnt/vlan-ip/05-script-ip-list-initialize.sh $SUBNET $REGION
+            /mnt/vlan-ip/05-script-ip-list-initialize.sh "$SUBNET" "$REGION"
+
         # Environment variable for subnet
         env:
         - name: SUBNET
@@ -97,21 +103,13 @@ spec:
             configMapKeyRef:
               name: vlan-manager-config
               key: LINODE_CLI_CONFIG
+        - name: ETCD_ENDPOINTS
+          value: "${ETCD_ENDPOINTS}"
+
         # Volume mounts for persistence and script access
         volumeMounts:
-        - name: vlan-ip-pv
-          mountPath: /mnt/vlan-ip
         - name: vlan-manager-scripts
           mountPath: /root/scripts
-
-        # Lifecycle hooks for better management
-        lifecycle:
-          postStart:
-            exec:
-              command: ["/bin/bash", "-c", "echo 'PostStart Hook Executed. Volume Mounted.'"]
-          preStop:
-            exec:
-              command: ["/bin/bash", "-c", "umount /mnt/vlan-ip && echo 'Volume Unmounted successfully.'"]
 
         # Security context to run with elevated permissions
         securityContext:
@@ -124,9 +122,6 @@ spec:
 
       # Define Persistent Volumes
       volumes:
-      - name: vlan-ip-pv
-        persistentVolumeClaim:
-          claimName: vlan-ip-pvc
       - name: vlan-manager-scripts
         configMap:
           name: vlan-manager-scripts

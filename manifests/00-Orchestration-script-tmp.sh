@@ -12,9 +12,6 @@ cleanup() {
     echo "🧹 Cleaning up Initializer Job..."
     kubectl delete job vlan-ip-initializer -n kube-system --ignore-not-found && echo "✅ Initializer Job deleted."
     
-    echo "🧹 Cleaning up VLAN Leader Manager Deployment..."
-    kubectl delete deployment vlan-leader-manager -n kube-system --ignore-not-found && echo "✅ VLAN Leader Manager Deployment deleted."
-    
     echo "🧹 Cleaning up VLAN Manager DaemonSet..."
     kubectl delete daemonset vlan-manager -n kube-system --ignore-not-found && echo "✅ VLAN Manager DaemonSet deleted."
     
@@ -28,6 +25,9 @@ cleanup() {
     kubectl delete service etcd -n kube-system --ignore-not-found && echo "✅ etcd Service deleted."
     kubectl delete service etcd-headless -n kube-system --ignore-not-found && echo "✅ etcd Headless Service deleted."
     kubectl delete pvc -l app=etcd -n kube-system --ignore-not-found && echo "✅ etcd PVCs deleted."
+
+    echo "🧹 Cleaning up VLAN Leader Manager Deployment..."
+    kubectl delete deployment vlan-leader-manager -n kube-system --ignore-not-found && echo "✅ VLAN Leader Manager Deployment deleted."
 
     echo "✅ Cleanup complete."
 }
@@ -73,13 +73,34 @@ Apply_Initializer_Job() {
     if [ "$NODE_COUNT" -lt 3 ]; then
         log "🚦 Node count <$NODE_COUNT> is less than 3 setting the etcd endpoint accordingly..."
         export ETCD_ENDPOINTS="http://etcd-0.etcd.kube-system.svc.cluster.local:2379"
-        envsubst < 05-vlan-ip-initializer-job.yaml | kubectl apply -f -
+        envsubst '${ETCD_ENDPOINTS}' < 05-vlan-ip-initializer-job.yaml | kubectl apply -f -
+        unset ETCD_ENDPOINTS
     else
         log "🚀 Node count is $NODE_COUNT setting the etcd endpoint accordingly..."
         export ETCD_ENDPOINTS="http://etcd-0.etcd.kube-system.svc.cluster.local:2379,http://etcd-1.etcd.kube-system.svc.cluster.local:2379,http://etcd-2.etcd.kube-system.svc.cluster.local:2379"
-        envsubst < 05-vlan-ip-initializer-job.yaml | kubectl apply -f -
+        envsubst '${ETCD_ENDPOINTS}' < 05-vlan-ip-initializer-job.yaml | kubectl apply -f -
+        unset ETCD_ENDPOINTS
     fi
 }
+
+# === setting the etcd endpoint in leader manager deployment based on node count ===
+Apply_etcd_endpoint_leader_manager_deployment() {
+    NODE_COUNT=$(get_worker_node_count)
+    log "📊 Detected $NODE_COUNT worker node(s) in the cluster."
+
+    if [ "$NODE_COUNT" -lt 3 ]; then
+        log "🚦 Node count <$NODE_COUNT> is less than 3 setting the etcd endpoint accordingly..."
+        export ETCD_ENDPOINTS="http://etcd-0.etcd.kube-system.svc.cluster.local:2379"
+        envsubst '${ETCD_ENDPOINTS}' < 06-vlan-leader-manager-deployment.yaml | kubectl apply -f -
+        unset ETCD_ENDPOINTS
+    else
+        log "🚀 Node count is $NODE_COUNT setting the etcd endpoint accordingly..."
+        export ETCD_ENDPOINTS="http://etcd-0.etcd.kube-system.svc.cluster.local:2379,http://etcd-1.etcd.kube-system.svc.cluster.local:2379,http://etcd-2.etcd.kube-system.svc.cluster.local:2379"
+        envsubst '${ETCD_ENDPOINTS}' < 06-vlan-leader-manager-deployment.yaml | kubectl apply -f -
+        unset ETCD_ENDPOINTS
+    fi
+}
+
 
 # === Step 1: Apply StorageClass ===
 echo "🔄 Checking for existing Linode Block StorageClass..."
@@ -106,6 +127,32 @@ kubectl apply -f 00-vlan-manager-configmap.yaml || exit 1
 echo "✅ ETCD deployment initiated based on node count."
 deploy_etcd_cluster
 
+echo "⏳ Waiting for etcd pods to be registered in Kubernetes..."
+for i in {1..10}; do
+    etcd_pods=$(kubectl get pods -n kube-system -l app=etcd --no-headers 2>/dev/null | wc -l)
+    if [ "$etcd_pods" -ge 1 ]; then
+        echo "✅ etcd pods found: $etcd_pods"
+        break
+    fi
+    echo "🔄 etcd pods not found yet. Retrying in 5 seconds... ($i/10)"
+    sleep 5
+done
+
+echo "⏳ Waiting for all etcd pods to become Ready..."
+for i in {1..24}; do
+    not_ready=$(kubectl get pods -n kube-system -l app=etcd --field-selector=status.phase!=Running --no-headers | wc -l)
+    ready_count=$(kubectl get pods -n kube-system -l app=etcd --field-selector=status.phase=Running --no-headers | grep '1/1' | wc -l)
+    total=$(kubectl get pods -n kube-system -l app=etcd --no-headers 2>/dev/null | wc -l)
+    
+    if [ "$total" -eq "$ready_count" ] && [ "$total" -gt 0 ]; then
+        echo "✅ All etcd pods are Ready."
+        break
+    fi
+
+    echo "🔄 etcd pods not ready yet. Retrying in 5 seconds... ($i/24)"
+    sleep 5
+done
+
 # === Step 5: Apply Initializer Job ===
 echo "🚀 Launching VLAN IP Initializer Job..."
 Apply_Initializer_Job
@@ -127,7 +174,7 @@ kubectl wait --for=condition=complete --timeout=600s job/vlan-ip-initializer -n 
 
 # === Step 6: Deploy Leader Manager Deployment ===
 echo "🚀 Deploying VLAN Leader Manager..."
-kubectl apply -f 06-vlan-leader-manager-deployment.yaml || exit 1
+Apply_etcd_endpoint_leader_manager_deployment
 
 # Wait for deployment to be ready
 echo "⏳ Waiting for VLAN Leader Manager to be ready..."
@@ -154,8 +201,6 @@ if [ $i -eq 10 ]; then
     exit 1
 fi
 
-echo "✅ VLAN Leader Manager is up and running."
-
 # === Step 7: Deploy VLAN Manager DaemonSet ===
 echo "🚀 Deploying VLAN Manager DaemonSet..."
 kubectl apply -f 07-vlan-manager-daemonset.yaml || exit 1
@@ -178,6 +223,8 @@ echo "🔍 You can monitor the logs using the following commands:"
 for pod in $PODS; do
     echo "kubectl logs -f pod/$pod -n kube-system"
 done
+
+echo "✅ VLAN Leader Manager is up and running."
 
 echo "🎉 Orchestration Complete! VLAN Manager is fully operational."
 
