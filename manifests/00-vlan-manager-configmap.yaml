@@ -68,7 +68,7 @@ data:
   ENABLE_FIREWALL: "true"
 
   # Linode LKE Cluster ID (used for dynamic firewall attachment)
-  LKE_CLUSTER_ID: "451247"
+  LKE_CLUSTER_ID: "496258"
 
   # Primary subnet/Lindoe side VLAN interfaces subnet
   SUBNET: "172.16.0.0/12"
@@ -83,14 +83,18 @@ data:
   KUBECONFIG: "/tmp/kubeconfig"
 
   # Path to the Kubeconfig file for managing Kubernetes
-  LINODE_API_KEY: "<YOUR_LINODE_API_KEY>"
+  LINODE_API_KEY: "dbe8ba8e2f3ddf8a7488e8f56152c9d7a931d0ae6a837a5916ee6d48654e3b55"
 
   # Linode CLI configuration details
   LINODE_CLI_CONFIG: |
       [DEFAULT]
-      default-user = <YOUR_USER_NAME>
+      default-user = sgangdha
       
-      [spog_admin]
-      token = "<YOUR_LINODE_API_KEY>"
+      [sgangdha]
+      token = dbe8ba8e2f3ddf8a7488e8f56152c9d7a931d0ae6a837a5916ee6d48654e3b55
       region = in-maa
+      plugin-obj-access-key = RCWTMC4K2KX2GUZQTDWQ
+      plugin-obj-secret-key = iYwHRnrZ2f3TMG4f63Vo2vM3E9rgcvKDglUAezYy
+      plugin-obj-cluster = in-bom-2
+      authorized_users = sgangdha
       suppress-version-warning = true

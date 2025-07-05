@@ -15,14 +15,13 @@ import aiohttp
 import psutil
 import signal
 import configparser
+import etcd3
+import random
 
 # Initialize Flask application instance
 app = Flask(__name__)
 # Enable Cross-Origin Resource Sharing (CORS) for this Flask app
 CORS(app)
-
-# Define the path to the IP address allocation list file
-IP_FILE_PATH = "/mnt/vlan-ip/vlan-ip-list.txt"
 
 # Define the log file path for logging allocation and healthcheck events
 LOG_FILE = "/tmp/allocate-ip.log"
@@ -32,9 +31,6 @@ MAX_LOG_LINES = 1000
 
 # Maximum backoff time in seconds for retry loops (e.g., API retries)
 MAX_BACKOFF = 60
-
-# Default region list used if API-based region fetch fails
-FALLBACK_REGIONS = ['us-east', 'us-west', 'in-maa', 'eu-west', 'eu-central']
 
 # Cache dictionary to store VLAN IPs with a TTL for performance
 VLAN_IP_CACHE = {
@@ -60,157 +56,89 @@ signal.signal(signal.SIGTERM, graceful_exit)
 signal.signal(signal.SIGINT, graceful_exit)
 
 
-# Async region fetching
-async def fetch_regions_async(headers, retries=3, backoff=2):
-    async with aiohttp.ClientSession() as session:
-        for attempt in range(retries):
-            try:
-                async with session.get("https://api.linode.com/v4/regions", headers=headers, timeout=5) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return [r["id"] for r in data.get("data", [])]
-                    elif response.status == 429:
-                        wait_time = int(response.headers.get('Retry-After', 5))
-                        log(f"[WARN] Rate limited (429). Retrying after {wait_time} seconds...")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        log(f"[WARN] API call failed with status {response.status}. Retrying in {backoff} seconds...")
-                        await asyncio.sleep(backoff)
-                        # Maximum backoff time in seconds for retry loops (e.g., API retries)
-                        backoff = min(backoff * 2, MAX_BACKOFF)
-            except aiohttp.ClientError as e:
-                log(f"[ERROR] Network error during async API call: {str(e)}. Retrying in {backoff} seconds...")
-                await asyncio.sleep(backoff)
-                # Maximum backoff time in seconds for retry loops (e.g., API retries)
-                backoff = min(backoff * 2, MAX_BACKOFF)
-        log("[ERROR] Failed to fetch regions after retries")
-        return None
-
-
-async def update_regions_cache():
-    linode_token = fetch_linode_token()
-    if linode_token:
-        headers = {"Authorization": f"Bearer {linode_token}"}
-        regions = await fetch_regions_async(headers)
-        if regions:
-            # Default region list used if API-based region fetch fails
-            global FALLBACK_REGIONS
-            # Default region list used if API-based region fetch fails
-            FALLBACK_REGIONS = regions
-            # Default region list used if API-based region fetch fails
-            log(f"[INFO] Updated fallback regions: {FALLBACK_REGIONS}")
-
-
-async def schedule_region_updates():
-    while True:
-        await update_regions_cache()
-        await asyncio.sleep(600)
-
 
 def validate_environment():
-    errors = []
     REGION = os.getenv("REGION")
     if not REGION:
-        errors.append("REGION environment variable not set")
-    else:
-        linode_token = fetch_linode_token()
-        # Default region list used if API-based region fetch fails
-        valid_regions = FALLBACK_REGIONS
-        if linode_token:
-            headers = {"Authorization": f"Bearer {linode_token}"}
-            response = api_request_with_retry("https://api.linode.com/v4/regions", headers)
-            if response:
-                valid_regions = [r["id"] for r in response.get("data", [])]
-                log(f"[DEBUG] Valid Linode regions: {valid_regions}")
-            else:
-                asyncio.create_task(schedule_region_updates())
-        if REGION not in valid_regions:
-            errors.append(f"Invalid region: {REGION}. Valid regions: {valid_regions}")
-
-    # Define the path to the IP address allocation list file
-    ip_dir = os.path.dirname(IP_FILE_PATH)
-    if not os.access(ip_dir, os.W_OK):
-        errors.append(f"No write permission for directory {ip_dir}")
-
-    # Define the log file path for logging allocation and healthcheck events
-    log_dir = os.path.dirname(LOG_FILE)
-    if not os.access(log_dir, os.W_OK):
-        errors.append(f"No write permission for directory {log_dir}")
-
-    try:
-        requests.get("https://api.linode.com/v4/regions", timeout=5)
-    except requests.RequestException:
-        errors.append("No network connectivity to Linode API")
-
-    if errors:
-        for error in errors:
-            log(f"[ERROR] {error}")
+        log("[ERROR] REGION environment variable not set.")
+        sys.exit(1)
+    if not os.getenv("ETCD_ENDPOINTS"):
+        log("[ERROR] ETCD_ENDPOINTS environment variable not set.")
         sys.exit(1)
 
+    log("[INFO] Environment validation passed.")
 
 def log(message):
-    print(message)
+    timestamped_message = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+    print(timestamped_message)
     sys.stdout.flush()
-    # Define the log file path for logging allocation and healthcheck events
-    with FileLock(LOG_FILE + ".lock"):
-        try:
+
+    try:
+        with FileLock(LOG_FILE + ".lock"):
             lines = []
-            # Define the log file path for logging allocation and healthcheck events
+
+            # Read existing log if available
             if os.path.exists(LOG_FILE):
-                # Define the log file path for logging allocation and healthcheck events
                 with open(LOG_FILE, "r") as f:
                     lines = f.read().splitlines()
-            lines.append(message)
-            # Maximum number of log lines to retain in the log file
+
+            # Append new log entry and trim if necessary
+            lines.append(timestamped_message)
             lines = lines[-MAX_LOG_LINES:]
-            # Define the log file path for logging allocation and healthcheck events
+
+            # Write back to log file
             with open(LOG_FILE, "w") as f:
                 f.write("\n".join(lines) + "\n")
-        except Exception as e:
-            print(f"[ERROR] Failed to write to log file: {str(e)}")
+    except Exception as e:
+        print(f"[ERROR] Failed to write to log file: {str(e)}")
 
 
-def api_request_with_retry(url, headers, retries=3, backoff=2):
-    for attempt in range(retries):
+def api_request_with_retry(url, headers, retries=3, backoff=2, jitter=True):
+    """
+    Make an HTTP GET request with retry, exponential backoff, and optional jitter.
+    """
+    for attempt in range(1, retries + 1):
         try:
             response = requests.get(url, headers=headers, timeout=5)
+
             if response.status_code == 200:
                 try:
                     return response.json()
-                except ValueError as e:
-                    log(f"[ERROR] Invalid JSON response: {response.text}")
+                except ValueError:
+                    log(f"[ERROR] Invalid JSON response on attempt {attempt}: {response.text}")
                     return None
+
             elif response.status_code == 429:
-                wait_time = int(response.headers.get('Retry-After', 5))
-                log(f"[WARN] Rate limited (429). Retrying after {wait_time} seconds...")
+                wait_time = int(response.headers.get("Retry-After", 5))
+                log(f"[WARN] Rate limited (429). Retrying after {wait_time}s (attempt {attempt}/{retries})")
                 time.sleep(wait_time)
+
             elif response.status_code >= 500:
-                log(f"[WARN] Server error {response.status_code}. Retrying in {backoff} seconds...")
-                time.sleep(backoff)
-                # Maximum backoff time in seconds for retry loops (e.g., API retries)
-                backoff = min(backoff * 2, MAX_BACKOFF)
+                log(f"[WARN] Server error {response.status_code} on attempt {attempt}. Retrying...")
+                _sleep_with_backoff(backoff, attempt, jitter)
+
             else:
-                log(f"[WARN] API call failed with status {response.status_code}. Retrying in {backoff} seconds...")
-                time.sleep(backoff)
-                # Maximum backoff time in seconds for retry loops (e.g., API retries)
-                backoff = min(backoff * 2, MAX_BACKOFF)
-        except requests.ConnectionError as e:
-            log(f"[ERROR] Connection error during API call: {str(e)}. Retrying in {backoff} seconds...")
-            time.sleep(backoff)
-            # Maximum backoff time in seconds for retry loops (e.g., API retries)
-            backoff = min(backoff * 2, MAX_BACKOFF)
-        except requests.Timeout as e:
-            log(f"[ERROR] Timeout during API call: {str(e)}. Retrying in {backoff} seconds...")
-            time.sleep(backoff)
-            # Maximum backoff time in seconds for retry loops (e.g., API retries)
-            backoff = min(backoff * 2, MAX_BACKOFF)
+                log(f"[WARN] API error {response.status_code} on attempt {attempt}. Retrying...")
+                _sleep_with_backoff(backoff, attempt, jitter)
+
+        except (requests.ConnectionError, requests.Timeout) as e:
+            log(f"[ERROR] Network error on attempt {attempt}: {str(e)}. Retrying...")
+            _sleep_with_backoff(backoff, attempt, jitter)
+
         except requests.RequestException as e:
-            log(f"[ERROR] Other network error during API call: {str(e)}. Retrying in {backoff} seconds...")
-            time.sleep(backoff)
-            # Maximum backoff time in seconds for retry loops (e.g., API retries)
-            backoff = min(backoff * 2, MAX_BACKOFF)
+            log(f"[ERROR] Unexpected error on attempt {attempt}: {str(e)}. Retrying...")
+            _sleep_with_backoff(backoff, attempt, jitter)
+
     log(f"[ERROR] API call failed after {retries} attempts.")
     return None
+
+
+def _sleep_with_backoff(base_backoff, attempt, jitter=True):
+    wait_time = min(base_backoff * (2 ** (attempt - 1)), MAX_BACKOFF)
+    if jitter:
+        wait_time += random.uniform(0.1, 0.5)
+    log(f"[DEBUG] Waiting {wait_time:.2f}s before retrying...")
+    time.sleep(wait_time)
 
 
 def fetch_linode_token(config_file='/root/.linode-cli/linode-cli'):
@@ -223,54 +151,35 @@ def fetch_linode_token(config_file='/root/.linode-cli/linode-cli'):
     Returns:
         str: The token value, or None if not found
     """
-    # Check if the file exists
     if not os.path.exists(config_file):
-        print(f"Error: Configuration file {config_file} not found")
+        log(f"[ERROR] Configuration file {config_file} not found")
         return None
 
-    # Initialize config parser
     config = configparser.ConfigParser()
 
     try:
-        # Read the configuration file
         config.read(config_file)
 
-        # Get the default user from the [DEFAULT] section
         if 'DEFAULT' not in config or 'default-user' not in config['DEFAULT']:
-            print(f"Error: No default-user found in {config_file}")
+            log(f"[ERROR] No 'default-user' found in {config_file}")
             return None
 
         default_user = config['DEFAULT']['default-user']
 
-        # Check if the user section exists
         if default_user not in config:
-            print(f"Error: User profile '{default_user}' not found in {config_file}")
+            log(f"[ERROR] User profile '{default_user}' not found in {config_file}")
             return None
 
-        # Extract the token
         token = config[default_user].get('token')
         if not token:
-            print(f"Error: No token found for user '{default_user}' in {config_file}")
+            log(f"[ERROR] No token found for user '{default_user}' in {config_file}")
             return None
 
         return token
 
     except Exception as e:
-        print(f"Error reading configuration file: {str(e)}")
+        log(f"[ERROR] Exception while reading configuration file: {str(e)}")
         return None
-
-
-def remove_duplicates():
-    with FileLock(IP_FILE_PATH + ".lock"):
-        try:
-            with open(IP_FILE_PATH, 'r') as f:
-                unique_lines = set(f.read().splitlines())
-            with open(IP_FILE_PATH, 'w') as f:
-                f.write("\n".join(unique_lines) + "\n")
-            log(f"[INFO] Removed duplicates from IP file. Unique IPs: {len(unique_lines)}")
-        except FileNotFoundError:
-            log(f"[WARNING] IP file {IP_FILE_PATH} not found during deduplication")
-
 
 def fetch_assigned_ips():
     if (
@@ -345,14 +254,6 @@ def fetch_assigned_ips():
 
     return vlan_ips
 
-
-def safe_update_ip_list(ips):
-    with FileLock(IP_FILE_PATH + ".lock"):
-        with open(IP_FILE_PATH, 'a') as f:
-            f.write("\n".join(str(ip) for ip in ips) + "\n")
-    log(f"[INFO] Successfully wrote {len(ips)} IPs to file: {ips}")
-
-
 def system_health_check():
     load_avg = os.getloadavg()
     mem = psutil.virtual_memory()
@@ -366,6 +267,38 @@ def system_health_check():
         log("[WARN] High memory usage detected")
         return False
     return True
+
+def get_etcd_connection():
+    endpoints = os.getenv("ETCD_ENDPOINTS", "")
+    if not endpoints:
+        raise EnvironmentError("ETCD_ENDPOINTS not set in environment")
+
+    # Try each endpoint until successful
+    for ep in endpoints.split(","):
+        ep = ep.replace("http://", "").replace("https://", "").rstrip("/")  # Normalize scheme and slashes
+
+        parts = ep.split(":")
+        if len(parts) != 2:
+            log(f"[ERROR] Invalid ETCD endpoint format: {ep}. Expected format: host:port")
+            continue
+
+        host = parts[0]
+        try:
+            port = int(parts[1])
+        except ValueError:
+            log(f"[ERROR] Port is not a valid integer in endpoint: {ep}")
+            continue
+
+        try:
+            client = etcd3.client(host=host, port=port)
+            client.status()  # Health check
+            log(f"[INFO] Connected to etcd: {host}:{port}")
+            return client
+        except Exception as e:
+            log(f"[WARN] Failed to connect to etcd endpoint {host}:{port}: {str(e)}")
+            continue
+
+    raise ConnectionError("Unable to connect to any etcd endpoint")
 
 
 # =======================
@@ -393,80 +326,95 @@ def allocate_ip():
             log("[ERROR] Invalid subnet format")
             return jsonify({"error": "Invalid subnet format"}), 400
 
-        remove_duplicates()
-        fetched_ips = fetch_assigned_ips()
-        if not fetched_ips:
-            fetched_ips = []
-            log("[WARN] No VLAN IPs were returned from Linode API. Proceeding with empty list.")
-        linode_ips = fetched_ips
+        # Connect to etcd
+        etcd = get_etcd_connection()
+        if not etcd:
+            return jsonify({"error": "Unable to connect to etcd"}), 500
 
-        log(f"[DEBUG] Assigned VLAN IPs found in Linode: {linode_ips}")
+        # Fetch all IPs already used from etcd
+        etcd_used_ips = set()
+        for value, meta in etcd.get_prefix("/vlan/ip/"):
+            if meta.key:
+                etcd_used_ips.add(meta.key.decode("utf-8").replace("/vlan/ip/", ""))
 
-        ip_list = []
-        try:
-            with FileLock(IP_FILE_PATH + ".lock"):
-                with open(IP_FILE_PATH, 'r') as f:
-                    ip_list = [line.strip() for line in f.read().splitlines() if line.strip()]
-            log(f"[DEBUG] Local IP List from file: {ip_list}")
-        except FileNotFoundError:
-            log(f"[WARNING] IP file {IP_FILE_PATH} not found, treating as empty")
-            ip_list = []
+        log(f"[DEBUG] IPs found in etcd: {etcd_used_ips}")
 
-        local_ip_set = set(ip_list)
-        linode_ip_set = set(linode_ips) if linode_ips else set()
+        # ✅ Fetch all Linode-assigned VLAN IPs (even if not in etcd)
+        linode_assigned_ips = set(fetch_assigned_ips())
 
-        new_linode_ips = linode_ip_set - local_ip_set
-        if new_linode_ips:
+        # ✅ Merge both to get full list of used IPs
+        used_ips = etcd_used_ips.union(linode_assigned_ips)
+
+        # Sync missing IPs into etcd
+        missing_in_etcd = linode_assigned_ips - etcd_used_ips
+        for ip in missing_in_etcd:
             try:
-                safe_update_ip_list(list(new_linode_ips))
-                local_ip_set.update(new_linode_ips)
-                log(f"[DEBUG] Local IP List after syncing Linode IPs: {list(local_ip_set)}")
+                etcd.put(f"/vlan/ip/{ip}", "true")
+                log(f"[SYNC] Added missing Linode-assigned IP to etcd: {ip}")
             except Exception as e:
-                log(f"[ERROR] Failed to sync Linode IPs: {str(e)}")
-                return jsonify({"error": f"Failed to sync Linode IPs: {str(e)}"}), 500
+                log(f"[ERROR] Failed to sync IP {ip} to etcd: {str(e)}")
 
-        log(f"[DEBUG] --- Begin IP Scan ---")
+        used_ips = etcd_used_ips.union(linode_assigned_ips)
 
-        attempted_ips = []
-        skipped_local = 0
-        skipped_linode = 0
+        # Determine reserved IPs
+        hosts = list(ip_net.hosts())
+        if len(hosts) >= 3:
+            reserved_ips = {
+                str(hosts[0]),
+                str(hosts[1]),
+                str(hosts[-1])
+            }
+        else:
+            reserved_ips = set()
 
-        for ip in ip_net.hosts():
+        skipped_reserved = 0
+        attempted_ips = 0
+
+        # Begin IP scan
+        for ip in hosts:
             candidate_ip = f"{ip}{cidr_suffix}"
-            attempted_ips.append(candidate_ip)
-            log(f"[DEBUG] Checking Candidate IP: {candidate_ip}")
+            attempted_ips += 1
 
-            if candidate_ip in local_ip_set:
-                log(f"[INFO] Skipping IP (Already allocated locally): {candidate_ip}")
-                skipped_local += 1
+            if candidate_ip in reserved_ips:
+                log(f"[INFO] Skipping Reserved IP: {candidate_ip}")
+                skipped_reserved += 1
                 continue
-            if candidate_ip in linode_ip_set:
-                log(f"[INFO] Skipping IP (Already allocated in Linode): {candidate_ip}")
-                skipped_linode += 1
+
+            if candidate_ip in used_ips:
+                log(f"[INFO] Skipping Already Allocated IP: {candidate_ip}")
                 continue
 
             try:
-                safe_update_ip_list([candidate_ip])
-                log(f"[SUCCESS] Allocated IP: {candidate_ip}")
-                return jsonify({"allocated_ip": candidate_ip}), 200
-            except OSError as e:
-                log(f"[ERROR] Failed to allocate IP {candidate_ip}: {str(e)}")
+                key = f"/vlan/ip/{candidate_ip}"
+                txn_success, _ = etcd.transaction(
+                    compare=[
+                        etcd.transactions.version(key) == 0  # Key must not exist
+                    ],
+                    success=[
+                        etcd.transactions.put(key, "true")
+                    ],
+                    failure=[]
+                )
+
+                if txn_success:
+                    log(f"[SUCCESS] Allocated IP: {candidate_ip}")
+                    return jsonify({"allocated_ip": candidate_ip}), 200
+                else:
+                    log(f"[INFO] Race condition — IP was just taken: {candidate_ip}")
+                    continue
+            except Exception as e:
+                log(f"[ERROR] etcd put failed for {candidate_ip}: {str(e)}")
                 return jsonify({"error": f"Failed to allocate IP: {str(e)}"}), 500
 
         error_msg = (
             f"No IPs available in subnet {subnet}. "
-            f"Attempted {len(attempted_ips)} IPs: {skipped_local} already allocated locally, "
-            f"{skipped_linode} already allocated in Linode."
+            f"Attempted {attempted_ips} IPs, "
+            f"{skipped_reserved} were reserved, "
+            f"{len(used_ips)} already allocated."
         )
         log(f"[ERROR] {error_msg}")
         return jsonify({"error": error_msg}), 400
 
-    except ValueError as e:
-        log(f"[ERROR] Invalid input in /allocate endpoint: {str(e)}")
-        return jsonify({"error": f"Invalid input: {str(e)}"}), 400
-    except requests.RequestException as e:
-        log(f"[ERROR] Network error in /allocate endpoint: {str(e)}")
-        return jsonify({"error": f"Network error: {str(e)}"}), 500
     except Exception as e:
         log(f"[ERROR] Unexpected error in /allocate endpoint: {str(e)}")
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
@@ -483,29 +431,49 @@ def release_ip():
             return jsonify({"error": "IP address not provided"}), 400
 
         ip_address = ip_address.strip()
+        REGION = os.getenv("REGION")
+        SUBNET = os.getenv("SUBNET")
+        if not REGION or not SUBNET:
+            return jsonify({"error": "Missing REGION or SUBNET env variable"}), 500
 
-        with open(IP_FILE_PATH, 'r') as f:
-            ip_list = [line.strip() for line in f.read().splitlines() if line.strip()]
+        try:
+            ip_net = ipaddress.ip_network(SUBNET, strict=False)
+            cidr_suffix = f"/{ip_net.prefixlen}"
+            hosts = list(ip_net.hosts())
 
-        if not ip_list:
-            return jsonify({"error": "IP list is empty"}), 500
+            reserved_ips = set()
+            if len(hosts) >= 3:
+                reserved_ips = {
+                    str(hosts[0]),
+                    str(hosts[1]),
+                    str(hosts[-1])
+                }
 
-        # Determine reserved IPs (first two and last one)
-        reserved_ips = set(ip_list[:2] + ip_list[-1:])
+            if ip_address in reserved_ips:
+                log(f"[WARN] Attempted to release reserved IP: {ip_address}")
+                return jsonify({"error": f"IP address {ip_address} is reserved and cannot be released."}), 403
 
-        if ip_address in reserved_ips:
-            return jsonify({"error": f"IP address {ip_address} is reserved and cannot be released."}), 403
+            etcd = get_etcd_connection()
+            if not etcd:
+                return jsonify({"error": "Failed to connect to etcd"}), 500
 
-        if ip_address in ip_list:
-            ip_list.remove(ip_address)
-            with open(IP_FILE_PATH, 'w') as f:
-                f.write("\n".join(ip_list) + "\n")
-            return jsonify({"status": "IP released", "ip": ip_address}), 200
-        else:
-            return jsonify({"error": f"IP address {ip_address} not found in the allocation list."}), 404
+            key = f"/vlan/ip/{ip_address}"
+            deleted = etcd.delete(key)
+
+            if deleted:
+                log(f"[INFO] Released IP from etcd: {ip_address}")
+                return jsonify({"status": "IP released", "ip": ip_address}), 200
+            else:
+                log(f"[WARN] IP {ip_address} not found in etcd")
+                return jsonify({"error": f"IP address {ip_address} not found in etcd"}), 404
+
+        except Exception as e:
+            log(f"[ERROR] Release failed: {str(e)}")
+            return jsonify({"error": f"Release failed: {str(e)}"}), 500
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+        log(f"[ERROR] Unexpected error in /release endpoint: {str(e)}")
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
 # =======================
 # 🔵 Health Check Endpoint
@@ -555,13 +523,12 @@ def health_check():
         elif not REGION_CACHE["valid"]:
             log(f"[ERROR] Health check: Cached result indicates invalid region {REGION}")
             return jsonify({"status": "unhealthy", "error": f"Invalid or unavailable region {REGION}"}), 500
-
         try:
-            with FileLock(IP_FILE_PATH + ".lock"), open(IP_FILE_PATH, 'a'):
-                pass
-        except OSError as e:
-            log(f"[ERROR] Health check: Failed to access IP file: {str(e)}")
-            return jsonify({"status": "unhealthy", "error": f"Failed to access IP file: {str(e)}"}), 500
+            etcd = get_etcd_connection()
+            etcd.status()
+        except Exception as e:
+            log(f"[ERROR] Health check: Failed to connect to etcd: {str(e)}")
+            return jsonify({"status": "unhealthy", "error": f"etcd connection failed: {str(e)}"}), 500
 
         if not system_health_check():
             log("[ERROR] Health check: System health checks failed")
@@ -576,7 +543,6 @@ def health_check():
     except Exception as e:
         log(f"[ERROR] Health check: Unexpected error: {str(e)}")
         return jsonify({"status": "unhealthy", "error": f"Unexpected error: {str(e)}"}), 500
-
 
 # =======================
 # 🚀 Start Flask Application

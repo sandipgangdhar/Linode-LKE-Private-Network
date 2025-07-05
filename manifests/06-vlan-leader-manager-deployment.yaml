@@ -99,13 +99,18 @@ spec:
               echo "✅ Linode CLI configuration completed."
 
               # Install Flask and Flask-CORS
-              pip install flask flask-cors requests filelock aiohttp psutil && \
+              pip install flask flask-cors etcd3 requests filelock aiohttp psutil && \
+              pip install 'protobuf<4.0.0,>=3.20.0' && \
+              echo "✅ flask flask-cors etcd3 requests filelock aiohttp psutil installation completed."
 
               # Copy the script and prepare it for execution
               cp --dereference /root/scripts/06-rest-api.py /tmp/06-rest-api.py && \
               chmod u+x /tmp/06-rest-api.py && \
+              echo "✅ copy of 06-rest-api.py from /root/scripts/ to /tmp completed."
 
               # Start the Flask application and log to file
+              echo "Running 06-rest-api.py script"
+              #sleep infinity 
               exec python3 /tmp/06-rest-api.py > /tmp/flask.log 2>&1
 
           # Environment variables
@@ -125,13 +130,13 @@ spec:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: REGION
+            - name: ETCD_ENDPOINTS
+              value: "${ETCD_ENDPOINTS}"
 
           # Mounting necessary scripts and VLAN IP storage
           volumeMounts:
             - name: vlan-manager-scripts
               mountPath: /root/scripts
-            - name: vlan-ip-storage
-              mountPath: /mnt/vlan-ip
 
           # Suggested Liveness and Readiness probes (Optional but recommended)
           livenessProbe:
@@ -153,9 +158,6 @@ spec:
         - name: vlan-manager-scripts
           configMap:
             name: vlan-manager-scripts
-        - name: vlan-ip-storage
-          persistentVolumeClaim:
-            claimName: vlan-ip-pvc
 
 ---
 apiVersion: v1

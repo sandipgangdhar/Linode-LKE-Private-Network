@@ -43,7 +43,7 @@ NC='\033[0m' # No Color
 
 LINODE_TOKEN="${LINODE_TOKEN}"
 #LINODE_TOKEN=`grep token /root/.linode-cli/linode-cli | awk -F'= ' {'print $2'}`
-OUTPUT_FILE="/mnt/vlan-ip/vlan-ip-list.txt"
+OUTPUT_FILE="/tmp/vlan-ip-list.txt"
 PAGE_SIZE=100
 CURRENT_PAGE=1
 TOTAL_PAGES=1
@@ -60,8 +60,16 @@ IP_FILE_PATH=$OUTPUT_FILE
 SUBNET=$1
 REGION=$2
 
+# === Function to Log Events ===
+# This function logs events with timestamps for better traceability
+log() {
+    echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
+}
+
 # === Validate Subnet is Provided ===
 # If the subnet is not passed as an argument, exit with an error
+log "[DEBUG] Script received SUBNET=$SUBNET REGION=$REGION"
+
 if [ -z "$SUBNET" ]; then
     log "[ERROR] No subnet provided for initialization."
     exit 1
@@ -74,26 +82,7 @@ if [ -z "$REGION" ]; then
     exit 1
 fi
 
-# === Function to Log Events ===
-# This function logs events with timestamps for better traceability
-log() {
-    echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
-}
-
 log "🔄 Starting IP List Initialization..."
-
-# === Check if the file already has data ===
-if [ -f "$IP_FILE_PATH" ] && [ -s "$IP_FILE_PATH" ]; then
-    log "IP List file already initialized. Skipping initialization."
-    exit 0
-fi
-
-# Initialize the files if not present
-if [ ! -f "$IP_FILE_PATH" ]; then
-    log "Creating IP list file at $IP_FILE_PATH"
-    touch $IP_FILE_PATH
-fi
-
 
 log "🌐 Subnet provided for initialization: $SUBNET"
 
@@ -277,8 +266,37 @@ cat linodes.txt | parallel -j "$MAX_JOBS" fetch_vlan_ips {}
 # --- Cleanup ---
 rm -f linodes.txt
 
+# === Remove duplicates ===
+sort -u "$OUTPUT_FILE" -o "$OUTPUT_FILE"
+
+log "✅ VLAN IP file created at $OUTPUT_FILE"
+
+# === Write to etcd using etcdctl txn ===
+log "💾 Syncing IPs to etcd..."
+log "✅ ETCD_ENDPOINTS is $ETCD_ENDPOINTS"
+
+if [ -z "$ETCD_ENDPOINTS" ]; then
+    log "[ERROR] ETCD_ENDPOINTS not set."
+    exit 1
+fi
+
+export ETCDCTL_API=3
+
+while IFS= read -r ip; do
+    key="/vlan/ip/$ip"
+    output=$(etcdctl --endpoints="$ETCD_ENDPOINTS" put --prev-kv "$key" "true" 2>&1)
+    if [[ "$output" == *"prev_kv"* ]]; then
+        log "🔁 IP $ip already exists in etcd, skipping."
+    else
+        log "✅ IP $ip synced to etcd."
+    fi
+done < "$OUTPUT_FILE"
+
+log "🎉 Initialization and etcd sync complete."
+
+echo -e "${GREEN}✅ VLAN IP Initialization Complete. IPs saved to etcd database."
+
 # --- Final Output ---
-echo -e "${GREEN}✅ VLAN IP Initialization Complete. IPs saved to $OUTPUT_FILE${NC}"
 cat "$OUTPUT_FILE"
 
 log "✅ IP List Initialization Complete. Saved to $IP_FILE_PATH"
