@@ -36,7 +36,7 @@ set -e
 
 # === Environment Variables ===
 # API endpoint for IP allocation
-API_ENDPOINT="http://vlan-leader-service.kube-system.svc.cluster.local:8080/allocate"
+API_ENDPOINT="http://vlan-ip-controller-service.kube-system.svc.cluster.local:8080/allocate"
 
 # Subnet is passed as the first argument
 SUBNET=$1
@@ -89,7 +89,7 @@ else
     # Log the failure and exit with an error status
     case $HTTP_CODE in
         404)
-            error "API Endpoint not found. Service 'vlan-leader-service' may not be running in namespace 'kube-system'."
+            error "API Endpoint not found. Service 'vlan-ip-controller-service' may not be running in namespace 'kube-system'."
             ;;
         500)
             error "No IP addresses available in the provided subnet."
