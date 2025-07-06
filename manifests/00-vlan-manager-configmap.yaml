@@ -68,7 +68,7 @@ data:
   ENABLE_FIREWALL: "true"
 
   # Linode LKE Cluster ID (used for dynamic firewall attachment)
-  LKE_CLUSTER_ID: "496258"
+  LKE_CLUSTER_ID: "496359"
 
   # Primary subnet/Lindoe side VLAN interfaces subnet
   SUBNET: "172.16.0.0/12"

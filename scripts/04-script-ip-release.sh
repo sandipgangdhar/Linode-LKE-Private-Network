@@ -36,7 +36,7 @@ set -e
 
 # === Environment Variables ===
 # API endpoint for IP release
-API_ENDPOINT="http://vlan-leader-service.kube-system.svc.cluster.local:8080/release"
+API_ENDPOINT="http://vlan-ip-controller-service.kube-system.svc.cluster.local:8080/release"
 
 # IP Address is passed as the first argument
 IP_ADDRESS=$1

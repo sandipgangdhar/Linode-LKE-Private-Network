@@ -375,7 +375,7 @@ data:
         set -e
         
         # API Endpoint for IP allocation
-        API_ENDPOINT="http://vlan-leader-service.kube-system.svc.cluster.local:8080/allocate"
+        API_ENDPOINT="http://vlan-ip-controller-service.kube-system.svc.cluster.local:8080/allocate"
         SUBNET=$1
         
         # Logging function
@@ -410,7 +410,7 @@ data:
         else
             case $HTTP_CODE in
                 404)
-                    error "API Endpoint not found. Service 'vlan-leader-service' may not be running in namespace 'kube-system'."
+                    error "API Endpoint not found. Service 'vlan-ip-controller-service' may not be running in namespace 'kube-system'."
                     ;;
                 500)
                     error "No IP addresses available in the provided subnet."
@@ -433,7 +433,7 @@ data:
         set -e
         
         # API Endpoint for IP release
-        API_ENDPOINT="http://vlan-leader-service.kube-system.svc.cluster.local:8080/release"
+        API_ENDPOINT="http://vlan-ip-controller-service.kube-system.svc.cluster.local:8080/release"
         IP_ADDRESS=$1
         
         # Logging function

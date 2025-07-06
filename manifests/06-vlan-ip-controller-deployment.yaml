@@ -39,29 +39,29 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   # Name and namespace for the deployment
-  name: vlan-leader-manager
+  name: vlan-ip-controller
   namespace: kube-system
 
 
 spec:
   # Number of replicas to maintain
-  replicas: 1
+  replicas: 3
 
 
   selector:
     matchLabels:
-      app: vlan-leader-manager
+      app: vlan-ip-controller
 
   template:
     metadata:
       labels:
-        app: vlan-leader-manager
+        app: vlan-ip-controller
 
     spec:
       # Service account with necessary RBAC permissions
       serviceAccountName: vlan-manager-sa
       containers:
-        - name: vlan-leader-manager
+        - name: vlan-ip-controller
           image: python:3.9
 
           # Command to run the Flask API
@@ -164,12 +164,12 @@ apiVersion: v1
 kind: Service
 metadata:
   # Name and namespace for the service
-  name: vlan-leader-service
+  name: vlan-ip-controller-service
   namespace: kube-system
 
 spec:
   selector:
-    app: vlan-leader-manager
+    app: vlan-ip-controller
 
   ports:
     - protocol: TCP
