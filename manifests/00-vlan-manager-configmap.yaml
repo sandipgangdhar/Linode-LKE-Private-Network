@@ -83,7 +83,7 @@ data:
   KUBECONFIG: "/tmp/kubeconfig"
 
   # Path to the Kubeconfig file for managing Kubernetes
-  LINODE_API_KEY: "dbe8ba8e2f3ddf8a7488e8f56152c9d7a931d0ae6a837a5916ee6d48654e3b55"
+  LINODE_API_KEY: "sdfdgfdgdfhdfhsdfsdhsedesfdsgsdgsdsd"
 
   # Linode CLI configuration details
   LINODE_CLI_CONFIG: |
@@ -91,10 +91,10 @@ data:
       default-user = sgangdha
       
       [sgangdha]
-      token = dbe8ba8e2f3ddf8a7488e8f56152c9d7a931d0ae6a837a5916ee6d48654e3b55
+      token = dsfgdfdbdb 
       region = in-maa
-      plugin-obj-access-key = RCWTMC4K2KX2GUZQTDWQ
-      plugin-obj-secret-key = iYwHRnrZ2f3TMG4f63Vo2vM3E9rgcvKDglUAezYy
+      plugin-obj-access-key = sdfdsbgb
+      plugin-obj-secret-key = sdfedfsbfbdnbdbf
       plugin-obj-cluster = in-bom-2
       authorized_users = sgangdha
       suppress-version-warning = true
