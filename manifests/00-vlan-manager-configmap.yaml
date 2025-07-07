@@ -59,42 +59,39 @@ data:
   ENABLE_PUSH_ROUTE: "true"
 
   # Gateway IP for the primary subnet
-  ROUTE_IP: "172.16.0.1"
+  ROUTE_IP: "192.168.0.1"
 
   # Destination subnet for static routing
-  DEST_SUBNET: "10.0.0.0/16"
+  DEST_SUBNET: "172.17.0.0/16"
 
   # Set to "false" if You don't want to attach the Firewall to LKE Cluster
   ENABLE_FIREWALL: "true"
 
   # Linode LKE Cluster ID (used for dynamic firewall attachment)
-  LKE_CLUSTER_ID: "496359"
+  LKE_CLUSTER_ID: "496515"
 
   # Primary subnet/Lindoe side VLAN interfaces subnet
-  SUBNET: "172.16.0.0/12"
+  SUBNET: "192.168.0.0/16"
 
   # Linod Region Name 
   REGION: "in-maa"
 
   # VLAN label used in Linode VLAN configration
-  VLAN_LABEL: "private-lan"
+  VLAN_LABEL: "hungama-prod-VLAN"
 
   # Path to the Kubeconfig file for managing Kubernetes
   KUBECONFIG: "/tmp/kubeconfig"
 
   # Path to the Kubeconfig file for managing Kubernetes
-  LINODE_API_KEY: "dcdsefdbfgsdsgasdvdasvdsvbdsvdsvdsfdsfsdsFsdafesafdsaFsfws"
+  LINODE_API_KEY: "24198f43e6adfc5b8455cf174d74220efeb0604fd4a7eea846ed815f6d35ebcf"
 
   # Linode CLI configuration details
   LINODE_CLI_CONFIG: |
       [DEFAULT]
-      default-user = sgangdha
+      default-user = sandip-dct
       
-      [sgangdha]
-      token = dcdsefdbfgsdsgasdvdasvdsvbdsvdsvdsfdsfsdsFsdafesafdsaFsfws
+      [sandip-dct]
+      token = 24198f43e6adfc5b8455cf174d74220efeb0604fd4a7eea846ed815f6d35ebcf
       region = in-maa
-      plugin-obj-access-key = WEKGFNSOJNVSDWVBWJSN
-      plugin-obj-secret-key = DSEFNALJDVNasfkewsalwndwkjqefkwnejfwsndf
-      plugin-obj-cluster = in-bom-2
-      authorized_users = sgangdha
+      authorized_users = sandip-dct
       suppress-version-warning = true

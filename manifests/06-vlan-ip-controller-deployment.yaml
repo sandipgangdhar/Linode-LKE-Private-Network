@@ -139,19 +139,19 @@ spec:
               mountPath: /root/scripts
 
           # Suggested Liveness and Readiness probes (Optional but recommended)
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8080
-            initialDelaySeconds: 15
-            periodSeconds: 20
-
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
+#          livenessProbe:
+#            httpGet:
+#              path: /health
+#              port: 8080
+#            initialDelaySeconds: 15
+#            periodSeconds: 20
+#
+#          readinessProbe:
+#            httpGet:
+#              path: /health
+#              port: 8080
+#            initialDelaySeconds: 5
+#            periodSeconds: 10
 
       # Define the volumes to be mounted
       volumes:

@@ -98,7 +98,21 @@ push_route() {
         set -e
 
         if [ $STATUS -eq 0 ]; then
-            log "✅ Route $DEST_SUBNET already exists. Skipping addition."
+            log "✅ Route $DEST_SUBNET already exists. Deleting the old route now and adding a new one."
+	    ip route delete 172.17.0.0/16 dev  docker0 proto kernel scope link src 172.17.0.1
+            log "⚙️  Adding route after deleting  $DEST_SUBNET via $ROUTE_IP on eth1..."
+
+            # Attempt to add the route
+            set +e
+            ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev eth1
+            ADD_STATUS=$?
+            set -e
+
+            if [ $ADD_STATUS -eq 0 ]; then
+                log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to eth1."
+            else
+                log "⚠️  Failed to add route after deleting the old one It may already exist."
+            fi
         else
             log "⚙️  Adding route $DEST_SUBNET via $ROUTE_IP on eth1..."
 
