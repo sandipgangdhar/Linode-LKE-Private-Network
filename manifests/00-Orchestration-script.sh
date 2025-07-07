@@ -26,8 +26,9 @@ cleanup() {
     kubectl delete service etcd-headless -n kube-system --ignore-not-found && echo "✅ etcd Headless Service deleted."
     kubectl delete pvc -l app=etcd -n kube-system --ignore-not-found && echo "✅ etcd PVCs deleted."
 
-    echo "🧹 Cleaning up VLAN Leader Manager Deployment..."
-    kubectl delete deployment vlan-leader-manager -n kube-system --ignore-not-found && echo "✅ VLAN Leader Manager Deployment deleted."
+    echo "🧹 Cleaning up VLAN IP CONTROLLER Deployment..."
+    kubectl delete deployment vlan-ip-controller -n kube-system --ignore-not-found && echo "✅ VLAN Leader Manager Deployment deleted."
+    kubectl delete service vlan-ip-controller-service -n kube-system --ignore-not-found && echo "✅ VLAN IP CONTROLLER service deleted."
 
     echo "✅ Cleanup complete."
 }
@@ -83,20 +84,20 @@ Apply_Initializer_Job() {
     fi
 }
 
-# === setting the etcd endpoint in leader manager deployment based on node count ===
-Apply_etcd_endpoint_leader_manager_deployment() {
+# === setting the etcd endpoint in vlan ip controller deployment based on node count ===
+Apply_etcd_endpoint_vlan_ip_controller_deployment() {
     NODE_COUNT=$(get_worker_node_count)
     log "📊 Detected $NODE_COUNT worker node(s) in the cluster."
 
     if [ "$NODE_COUNT" -lt 3 ]; then
         log "🚦 Node count <$NODE_COUNT> is less than 3 setting the etcd endpoint accordingly..."
         export ETCD_ENDPOINTS="http://etcd-0.etcd.kube-system.svc.cluster.local:2379"
-        envsubst '${ETCD_ENDPOINTS}' < 06-vlan-leader-manager-deployment.yaml | kubectl apply -f -
+        envsubst '${ETCD_ENDPOINTS}' < 06-vlan-ip-controller-deployment.yaml | kubectl apply -f -
         unset ETCD_ENDPOINTS
     else
         log "🚀 Node count is $NODE_COUNT setting the etcd endpoint accordingly..."
         export ETCD_ENDPOINTS="http://etcd-0.etcd.kube-system.svc.cluster.local:2379,http://etcd-1.etcd.kube-system.svc.cluster.local:2379,http://etcd-2.etcd.kube-system.svc.cluster.local:2379"
-        envsubst '${ETCD_ENDPOINTS}' < 06-vlan-leader-manager-deployment.yaml | kubectl apply -f -
+        envsubst '${ETCD_ENDPOINTS}' < 06-vlan-ip-controller-deployment.yaml | kubectl apply -f -
         unset ETCD_ENDPOINTS
     fi
 }
@@ -174,15 +175,15 @@ kubectl wait --for=condition=complete --timeout=600s job/vlan-ip-initializer -n 
 
 # === Step 6: Deploy Leader Manager Deployment ===
 echo "🚀 Deploying VLAN Leader Manager..."
-Apply_etcd_endpoint_leader_manager_deployment
+Apply_etcd_endpoint_vlan_ip_controller_deployment
 
 # Wait for deployment to be ready
 echo "⏳ Waiting for VLAN Leader Manager to be ready..."
-kubectl rollout status deployment/vlan-leader-manager -n kube-system
+kubectl rollout status deployment/vlan-ip-controller -n kube-system
 
 # === Check if port 8080 is open and healthy ===
-echo "🔎 Checking if port 8080 is available on vlan-leader-manager..."
-LEADER_POD=$(kubectl get pods -n kube-system -l app=vlan-leader-manager -o jsonpath='{.items[0].metadata.name}')
+echo "🔎 Checking if port 8080 is available on vlan-ip-controller..."
+LEADER_POD=$(kubectl get pods -n kube-system -l app=vlan-ip-controller -o jsonpath='{.items[0].metadata.name}')
 
 for i in {1..10}; do
     if kubectl exec -n kube-system $LEADER_POD -- curl -s http://localhost:8080/health &> /dev/null; then
@@ -196,8 +197,8 @@ done
 
 if [ $i -eq 10 ]; then
     echo "❌ VLAN Leader Manager failed to become healthy. Capturing logs..."
-    kubectl logs -n kube-system $LEADER_POD > vlan-leader-manager-logs.txt
-    echo "💡 Logs saved to vlan-leader-manager-logs.txt"
+    kubectl logs -n kube-system $LEADER_POD > vlan-ip-controller-logs.txt
+    echo "💡 Logs saved to vlan-ip-controller-logs.txt"
     exit 1
 fi
 
