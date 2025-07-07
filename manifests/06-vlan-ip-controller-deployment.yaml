@@ -1,4 +1,4 @@
-# 06-vlan-leader-manager-deployment.yaml
+# 06-vlan-ip-controller-deployment.yaml
 # 
 # This YAML file defines the Deployment and Service for the VLAN Leader Manager
 # in Linode LKE. It sets up a Flask-based REST API (`06-rest-api.py`) to manage
