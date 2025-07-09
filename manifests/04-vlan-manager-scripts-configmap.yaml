@@ -52,13 +52,12 @@ data:
         
         # === Environment Variables ===
         # These variables are populated from Kubernetes ConfigMap or environment
-        SUBNET="${SUBNET}"
-        ROUTE_IP="${ROUTE_IP}"
-        VLAN_LABEL="${VLAN_LABEL}"
-        DEST_SUBNET="${DEST_SUBNET}"
-        ENABLE_PUSH_ROUTE="$(echo "$ENABLE_PUSH_ROUTE" | tr '[:upper:]' '[:lower:]')"  # flag to control route pushing
-        ENABLE_FIREWALL="$(echo "$ENABLE_FIREWALL" | tr '[:upper:]' '[:lower:]')" # flag to control FIREWALL Creation and attachment
-        LKE_CLUSTER_ID="${LKE_CLUSTER_ID}"
+        export SUBNET="${SUBNET}"
+        export ROUTE_LIST="${ROUTE_LIST:-}"
+        export VLAN_LABEL="${VLAN_LABEL}"
+        export ENABLE_PUSH_ROUTE="$(echo "$ENABLE_PUSH_ROUTE" | tr '[:upper:]' '[:lower:]')"  # flag to control route pushing
+        export ENABLE_FIREWALL="$(echo "$ENABLE_FIREWALL" | tr '[:upper:]' '[:lower:]')" # flag to control FIREWALL Creation and attachment
+        export LKE_CLUSTER_ID="${LKE_CLUSTER_ID}"
         
         # === Function to Log Events ===
         # This function logs events with a timestamp
@@ -81,53 +80,74 @@ data:
         # === Function to push the route ===
         push_route() {
             if [[ "$ENABLE_PUSH_ROUTE" == "true" ]]; then
+                echo "📦 Parsing ROUTE_LIST from ConfigMap..."
         
-                # === Route Push Validation Logic ===
-                # This block conditionally validates routing variables only if route pushing is enabled.
-                #
-                # - ENABLE_PUSH_ROUTE: If set to "true", the script will attempt to push a static route.
-                # - ROUTE_IP and DEST_SUBNET must be set with valid non-placeholder values if ENABLE_PUSH_ROUTE is true.
-                #
-                # If ENABLE_PUSH_ROUTE is "false" (default), this block is skipped entirely and
-                # ROUTE_IP / DEST_SUBNET are ignored.
-                #
-                # Note: Even if ignored, placeholder values like "0.0.0.0" should be provided in the ConfigMap
-                #       to maintain Kubernetes YAML consistency.
+                echo "$ROUTE_LIST" | while read -r line; do
+                    if [[ "$line" =~ route_ip ]]; then
+                        ROUTE_IP=$(echo "$line" | awk -F': ' '{print $2}' | tr -d '"')
+                    elif [[ "$line" =~ dest_subnet ]]; then
+                        DEST_SUBNET=$(echo "$line" | awk -F': ' '{print $2}' | tr -d '"')
+                        
+                        # Ensure both values are present before continuing
+                        if [[ -z "$ROUTE_IP" || "$ROUTE_IP" == "0.0.0.0" || -z "$DEST_SUBNET" || "$DEST_SUBNET" == "0.0.0.0/0" ]]; then
+                            log "❌ Skipping invalid route: ROUTE_IP=$ROUTE_IP DEST_SUBNET=$DEST_SUBNET"
+                            unset ROUTE_IP DEST_SUBNET
+                            continue
+                        fi
         
-                if [[ -z "$ROUTE_IP" || "$ROUTE_IP" == "0.0.0.0" || -z "$DEST_SUBNET" || "$DEST_SUBNET" == "0.0.0.0/0" ]]; then
-                    log "❌ ENABLE_PUSH_ROUTE is true, but ROUTE_IP or DEST_SUBNET is unset or invalid."
-                    log "🛑 Skipping route push and sleeping indefinitely to avoid container crash loop."
-                    sleep infinity
-                fi
-                log "📦 ENABLE_PUSH_ROUTE value is: $ENABLE_PUSH_ROUTE"
-                log "📦 ROUTE_IP value is: $ROUTE_IP"
-                log "📦 DEST_SUBNET value is: $DEST_SUBNET"
+                        log "🔁 Processing Route: $DEST_SUBNET via $ROUTE_IP"
+                        log "📦 ENABLE_PUSH_ROUTE: $ENABLE_PUSH_ROUTE"
+                        log "📦 ROUTE_IP: $ROUTE_IP"
+                        log "📦 DEST_SUBNET: $DEST_SUBNET"
         
-                log "Checking if route already exists for $DEST_SUBNET..."
-            
-                # Temporarily disable exit-on-error
-                set +e
-                ip route show | grep -q "$DEST_SUBNET"
-                STATUS=$?
-                set -e
-                
-                if [ $STATUS -eq 0 ]; then
-                    log "✅ Route $DEST_SUBNET already exists. Skipping addition."
-                else
-                    log "⚙️  Adding route $DEST_SUBNET via $ROUTE_IP on eth1..."
-                    
-                    # Attempt to add the route
-                    set +e
-                    ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev eth1
-                    ADD_STATUS=$?
-                    set -e
-            
-                    if [ $ADD_STATUS -eq 0 ]; then
-                        log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to eth1."
-                    else
-                        log "⚠️  Failed to add route $DEST_SUBNET via $ROUTE_IP. It may already exist."
+                        if [ "$DEST_SUBNET" == "172.17.0.0/16" ]; then
+                            log "Checking if the default LKE route for $DEST_SUBNET exists"
+                            set +e
+                            ip route show | grep -q "$DEST_SUBNET"
+                            DEFAULT_LKE_ROUTE_STATUS=$?
+                            set -e
+        
+                            if [ $DEFAULT_LKE_ROUTE_STATUS -eq 0 ]; then
+                                log "✅ Default LKE Route for $DEST_SUBNET already exists. Deleting it now."
+                                set +e
+                                ip route delete 172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1
+                                DELETE_STATUS=$?
+                                set -e
+        
+                                if [ $DELETE_STATUS -eq 0 ]; then
+                                    log "✅ Default LKE Route for $DEST_SUBNET successfully deleted..."
+                                else
+                                    log "⚠️ Failed to delete default LKE route for $DEST_SUBNET. Please check it..."
+                                fi
+                            fi
+                        fi
+        
+                        log "Checking if route already exists for $DEST_SUBNET..."
+                        set +e
+                        ip route show | grep -q "$DEST_SUBNET"
+                        STATUS=$?
+                        set -e
+        
+                        if [ $STATUS -eq 0 ]; then
+                            log "✅ Route $DEST_SUBNET already exists. Skipping addition."
+                        else
+                            log "⚙️ Adding route $DEST_SUBNET via $ROUTE_IP on eth1..."
+                            set +e
+                            ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev eth1
+                            ADD_STATUS=$?
+                            set -e
+        
+                            if [ $ADD_STATUS -eq 0 ]; then
+                                log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to eth1."
+                            else
+                                log "⚠️ Failed to add route $DEST_SUBNET via $ROUTE_IP. It may already exist or be invalid."
+                            fi
+                        fi
+        
+                        # Reset variables for next block
+                        unset ROUTE_IP DEST_SUBNET
                     fi
-                fi
+                done
             else
                 log "ℹ️ Skipping route push as ENABLE_PUSH_ROUTE is set to false."
             fi
@@ -139,14 +159,14 @@ data:
                 log "ℹ️ Skipping firewall creation as ENABLE_FIREWALL is set to false."
                 return 0
             fi
-
+        
             FIREWALL_LABEL="lke-cluster-firewall-${LKE_CLUSTER_ID}"
             log "🔍 Checking if firewall '$FIREWALL_LABEL' already exists..."
-
+        
             set +e
             FIREWALL_ID=$(linode-cli firewalls list --json 2>/dev/null | jq -r ".[] | select(.label==\"$FIREWALL_LABEL\") | .id")
             set -e
-
+        
             if [[ -z "$FIREWALL_ID" ]]; then
                 log "🚀 Creating new firewall with label $FIREWALL_LABEL..."
                 set +e
@@ -172,18 +192,18 @@ data:
                   --json)
                 CREATE_STATUS=$?
                 set -e
-
+        
                 if [[ $CREATE_STATUS -ne 0 || -z "$CREATE_OUTPUT" ]]; then
                     log "❌ Failed to create firewall $FIREWALL_LABEL. Sleeping indefinitely to avoid crashloop."
                     sleep infinity
                 fi
-
+        
                 FIREWALL_ID=$(echo "$CREATE_OUTPUT" | jq -r '.[0].id')
                 log "✅ Firewall created with ID $FIREWALL_ID"
             else
                 log "✅ Firewall $FIREWALL_LABEL already exists with ID $FIREWALL_ID"
             fi
-
+        
             # Check if any firewall is already attached to this Linode
             log "🔍 Verifying if Linode ID $LINODE_ID already has any firewall attached..."
             FIREWALLS_WITH_ENTITIES=$(linode-cli firewalls list --json | jq -r '.[] | select(.entities != null) | @base64')
@@ -198,13 +218,13 @@ data:
                     fi
                 done
             done
-
+        
             log "🔗 Attaching firewall $FIREWALL_LABEL to Linode instance $LINODE_ID..."
             set +e
             linode-cli firewalls device-create "$FIREWALL_ID" --type linode --id "$LINODE_ID"
             ATTACH_STATUS=$?
             set -e
-
+        
             if [[ $ATTACH_STATUS -eq 0 ]]; then
                 # Wait for firewall to be fully attached before proceeding
                 ATTACH_WAIT_RETRIES=10
@@ -251,7 +271,7 @@ data:
         
         # === Discover Linode ID and Configuration ID ===
         # Linode API calls to find the instance ID and its configuration ID
-        LINODE_ID=$(linode-cli linodes list --json | jq -r ".[] | select(.ipv4[] | contains(\"$PUBLIC_IP\")) | .id")
+        LINODE_ID=$(kubectl get node "$(hostname)" -o json | jq -r '.spec.providerID' | cut -d '/' -f3)
         CONFIG_ID=$(linode-cli linodes configs-list $LINODE_ID --json | jq -r '.[0].id')
         
         # If either the Linode ID or Config ID is not found, retry after 60 seconds
@@ -282,7 +302,7 @@ data:
         
         while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
             log "🔄 Attempting to allocate IP address... (Attempt $((RETRY_COUNT+1))/$MAX_RETRIES)"
-            
+        
             set +e
             IP_ADDRESS1=$(/tmp/03-script-ip-allocate.sh $SUBNET)
             STATUS=$?
@@ -356,19 +376,10 @@ data:
         
         log "✅ VLAN Attachment completed successfully."
         log "🌐 Instance $LINODE_ID is now connected to VLAN $VLAN_LABEL with IP $IP_ADDRESS."
-        # The following block is removed because firewall success is now logged in create_and_attach_firewall:
-        # if [[ "$ENABLE_FIREWALL" == "true" ]]; then
-        #     if [[ -n "$FIREWALL_ID" ]]; then
-        #         log "🛡️ Firewall ENABLED – Firewall '$FIREWALL_LABEL' (ID: $FIREWALL_ID) successfully created/attached to instance."
-        #     else
-        #         log "⚠️ Firewall ENABLED – but Firewall ID not set. Check previous logs for errors during creation or attachment."
-        #     fi
-        # else
-        #     log "ℹ️ Firewall DISABLED – Skipping firewall creation and attachment as ENABLE_FIREWALL is set to false."
-        # fi
         log "🟢 VLAN and Firewall configuration steps completed successfully."
         log "🛌 Script execution complete. Sleeping indefinitely..."
         sleep infinity
+
   03-script-ip-allocate.sh: |
         #!/bin/bash
         # Exit on error
@@ -410,7 +421,7 @@ data:
         else
             case $HTTP_CODE in
                 404)
-                    error "API Endpoint not found. Service 'vlan-ip-controller-service' may not be running in namespace 'kube-system'."
+                    error "API Endpoint not found. Service 'vlan-leader-service' may not be running in namespace 'kube-system'."
                     ;;
                 500)
                     error "No IP addresses available in the provided subnet."
@@ -425,8 +436,8 @@ data:
                     error "Unexpected error (HTTP $HTTP_CODE) from API: $RESPONSE_BODY"
                     ;;
             esac
-        fi
-        
+        fi  
+      
   04-script-ip-release.sh: |
         #!/bin/bash
         # Exit on error

@@ -78,8 +78,12 @@ spec:
             - |
               echo "🔄 Starting VLAN Manager Setup..."
 
-              # === Install Dependencies ===
-              apt-get update && \
+              # === Install Dependencies with Retry Logic ===
+              for i in {1..5}; do
+                apt-get update && break
+                echo "❌ apt-get update failed. Retrying in 5s... ($i/5)"
+                sleep 5
+              done
               apt-get install -y jq apt-transport-https ca-certificates curl net-tools iproute2 && \
               echo "✅ Dependencies installed successfully."
 
@@ -135,8 +139,12 @@ spec:
               # === Copy Scripts ===
               cp --dereference /root/scripts/02-script-vlan-attach.sh /tmp/02-script-vlan-attach.sh && \
               chmod u+x /tmp/02-script-vlan-attach.sh && \
+              ls_output_02_script_vlan_attach=`ls -l /tmp/02-script-vlan-attach.sh` && \
+              echo "Ls output :- $ls_output_02_script_vlan_attach"
               cp --dereference /root/scripts/03-script-ip-allocate.sh /tmp/03-script-ip-allocate.sh && \
               chmod u+x /tmp/03-script-ip-allocate.sh && \
+              ls_output_03_script_ip_allocate=`ls -l /tmp/03-script-ip-allocate.sh` && \
+              echo "Ls output :- $ls_output_03_script_ip_allocate"
               echo "✅ Scripts copied and permissions set."
 
               # === Generate kubeconfig ===
@@ -172,6 +180,11 @@ spec:
 
           # Environment variables
           env:
+            - name: ROUTE_LIST
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: ROUTE_LIST
             - name: SUBNET
               valueFrom:
                 configMapKeyRef:
@@ -187,16 +200,6 @@ spec:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: KUBECONFIG
-            - name: ROUTE_IP
-              valueFrom:
-                configMapKeyRef:
-                  name: vlan-manager-config
-                  key: ROUTE_IP
-            - name: DEST_SUBNET
-              valueFrom:
-                configMapKeyRef:
-                  name: vlan-manager-config
-                  key: DEST_SUBNET
             - name: LINODE_CLI_CONFIG
               valueFrom:
                 configMapKeyRef:

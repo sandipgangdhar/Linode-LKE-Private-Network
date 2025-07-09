@@ -38,13 +38,12 @@ set -e
 
 # === Environment Variables ===
 # These variables are populated from Kubernetes ConfigMap or environment
-SUBNET="${SUBNET}"
-ROUTE_IP="${ROUTE_IP}"
-VLAN_LABEL="${VLAN_LABEL}"
-DEST_SUBNET="${DEST_SUBNET}"
-ENABLE_PUSH_ROUTE="$(echo "$ENABLE_PUSH_ROUTE" | tr '[:upper:]' '[:lower:]')"  # flag to control route pushing
-ENABLE_FIREWALL="$(echo "$ENABLE_FIREWALL" | tr '[:upper:]' '[:lower:]')" # flag to control FIREWALL Creation and attachment
-LKE_CLUSTER_ID="${LKE_CLUSTER_ID}"
+export SUBNET="${SUBNET}"
+export ROUTE_LIST="${ROUTE_LIST:-}"
+export VLAN_LABEL="${VLAN_LABEL}"
+export ENABLE_PUSH_ROUTE="$(echo "$ENABLE_PUSH_ROUTE" | tr '[:upper:]' '[:lower:]')"  # flag to control route pushing
+export ENABLE_FIREWALL="$(echo "$ENABLE_FIREWALL" | tr '[:upper:]' '[:lower:]')" # flag to control FIREWALL Creation and attachment
+export LKE_CLUSTER_ID="${LKE_CLUSTER_ID}"
 
 # === Function to Log Events ===
 # This function logs events with a timestamp
@@ -67,67 +66,74 @@ is_vlan_attached() {
 # === Function to push the route ===
 push_route() {
     if [[ "$ENABLE_PUSH_ROUTE" == "true" ]]; then
+        echo "📦 Parsing ROUTE_LIST from ConfigMap..."
 
-        # === Route Push Validation Logic ===
-        # This block conditionally validates routing variables only if route pushing is enabled.
-        #
-        # - ENABLE_PUSH_ROUTE: If set to "true", the script will attempt to push a static route.
-        # - ROUTE_IP and DEST_SUBNET must be set with valid non-placeholder values if ENABLE_PUSH_ROUTE is true.
-        #
-        # If ENABLE_PUSH_ROUTE is "false" (default), this block is skipped entirely and
-        # ROUTE_IP / DEST_SUBNET are ignored.
-        #
-        # Note: Even if ignored, placeholder values like "0.0.0.0" should be provided in the ConfigMap
-        #       to maintain Kubernetes YAML consistency.
+        echo "$ROUTE_LIST" | while read -r line; do
+            if [[ "$line" =~ route_ip ]]; then
+                ROUTE_IP=$(echo "$line" | awk -F': ' '{print $2}' | tr -d '"')
+            elif [[ "$line" =~ dest_subnet ]]; then
+                DEST_SUBNET=$(echo "$line" | awk -F': ' '{print $2}' | tr -d '"')
+                
+                # Ensure both values are present before continuing
+                if [[ -z "$ROUTE_IP" || "$ROUTE_IP" == "0.0.0.0" || -z "$DEST_SUBNET" || "$DEST_SUBNET" == "0.0.0.0/0" ]]; then
+                    log "❌ Skipping invalid route: ROUTE_IP=$ROUTE_IP DEST_SUBNET=$DEST_SUBNET"
+                    unset ROUTE_IP DEST_SUBNET
+                    continue
+                fi
 
-        if [[ -z "$ROUTE_IP" || "$ROUTE_IP" == "0.0.0.0" || -z "$DEST_SUBNET" || "$DEST_SUBNET" == "0.0.0.0/0" ]]; then
-            log "❌ ENABLE_PUSH_ROUTE is true, but ROUTE_IP or DEST_SUBNET is unset or invalid."
-            log "🛑 Skipping route push and sleeping indefinitely to avoid container crash loop."
-            sleep infinity
-        fi
-        log "📦 ENABLE_PUSH_ROUTE value is: $ENABLE_PUSH_ROUTE"
-        log "📦 ROUTE_IP value is: $ROUTE_IP"
-        log "📦 DEST_SUBNET value is: $DEST_SUBNET"
+                log "🔁 Processing Route: $DEST_SUBNET via $ROUTE_IP"
+                log "📦 ENABLE_PUSH_ROUTE: $ENABLE_PUSH_ROUTE"
+                log "📦 ROUTE_IP: $ROUTE_IP"
+                log "📦 DEST_SUBNET: $DEST_SUBNET"
 
-        log "Checking if route already exists for $DEST_SUBNET..."
+                if [ "$DEST_SUBNET" == "172.17.0.0/16" ]; then
+                    log "Checking if the default LKE route for $DEST_SUBNET exists"
+                    set +e
+                    ip route show | grep -q "$DEST_SUBNET"
+                    DEFAULT_LKE_ROUTE_STATUS=$?
+                    set -e
 
-        # Temporarily disable exit-on-error
-        set +e
-        ip route show | grep -q "$DEST_SUBNET"
-        STATUS=$?
-        set -e
+                    if [ $DEFAULT_LKE_ROUTE_STATUS -eq 0 ]; then
+                        log "✅ Default LKE Route for $DEST_SUBNET already exists. Deleting it now."
+                        set +e
+                        ip route delete 172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1
+                        DELETE_STATUS=$?
+                        set -e
 
-        if [ $STATUS -eq 0 ]; then
-            log "✅ Route $DEST_SUBNET already exists. Deleting the old route now and adding a new one."
-	    ip route delete 172.17.0.0/16 dev  docker0 proto kernel scope link src 172.17.0.1
-            log "⚙️  Adding route after deleting  $DEST_SUBNET via $ROUTE_IP on eth1..."
+                        if [ $DELETE_STATUS -eq 0 ]; then
+                            log "✅ Default LKE Route for $DEST_SUBNET successfully deleted..."
+                        else
+                            log "⚠️ Failed to delete default LKE route for $DEST_SUBNET. Please check it..."
+                        fi
+                    fi
+                fi
 
-            # Attempt to add the route
-            set +e
-            ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev eth1
-            ADD_STATUS=$?
-            set -e
+                log "Checking if route already exists for $DEST_SUBNET..."
+                set +e
+                ip route show | grep -q "$DEST_SUBNET"
+                STATUS=$?
+                set -e
 
-            if [ $ADD_STATUS -eq 0 ]; then
-                log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to eth1."
-            else
-                log "⚠️  Failed to add route after deleting the old one It may already exist."
+                if [ $STATUS -eq 0 ]; then
+                    log "✅ Route $DEST_SUBNET already exists. Skipping addition."
+                else
+                    log "⚙️ Adding route $DEST_SUBNET via $ROUTE_IP on eth1..."
+                    set +e
+                    ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev eth1
+                    ADD_STATUS=$?
+                    set -e
+
+                    if [ $ADD_STATUS -eq 0 ]; then
+                        log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to eth1."
+                    else
+                        log "⚠️ Failed to add route $DEST_SUBNET via $ROUTE_IP. It may already exist or be invalid."
+                    fi
+                fi
+
+                # Reset variables for next block
+                unset ROUTE_IP DEST_SUBNET
             fi
-        else
-            log "⚙️  Adding route $DEST_SUBNET via $ROUTE_IP on eth1..."
-
-            # Attempt to add the route
-            set +e
-            ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev eth1
-            ADD_STATUS=$?
-            set -e
-
-            if [ $ADD_STATUS -eq 0 ]; then
-                log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to eth1."
-            else
-                log "⚠️  Failed to add route $DEST_SUBNET via $ROUTE_IP. It may already exist."
-            fi
-        fi
+        done
     else
         log "ℹ️ Skipping route push as ENABLE_PUSH_ROUTE is set to false."
     fi
@@ -251,7 +257,7 @@ export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
 
 # === Discover Linode ID and Configuration ID ===
 # Linode API calls to find the instance ID and its configuration ID
-LINODE_ID=$(linode-cli linodes list --json | jq -r ".[] | select(.ipv4[] | contains(\"$PUBLIC_IP\")) | .id")
+LINODE_ID=$(kubectl get node "$(hostname)" -o json | jq -r '.spec.providerID' | cut -d '/' -f3)
 CONFIG_ID=$(linode-cli linodes configs-list $LINODE_ID --json | jq -r '.[0].id')
 
 # If either the Linode ID or Config ID is not found, retry after 60 seconds
