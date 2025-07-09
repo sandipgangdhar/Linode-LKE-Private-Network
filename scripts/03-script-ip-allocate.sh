@@ -33,6 +33,10 @@
 #!/bin/bash
 # Exit on error
 set -e
+if [[ -z "$SUBNET" ]]; then
+    echo "[ERROR] SUBNET is not defined. Exiting."
+    exit 1
+fi
 
 # === Environment Variables ===
 # API endpoint for IP allocation

@@ -58,17 +58,22 @@ data:
   # Set to "false" if VPN route is not needed
   ENABLE_PUSH_ROUTE: "true"
 
-  # Gateway IP for the primary subnet
-  ROUTE_IP: "192.168.0.1"
-
-  # Destination subnet for static routing
-  DEST_SUBNET: "172.17.0.0/16"
+  # Taking the input for routes 
+  # route_ip is Gateway IP for the subnet normally your NAT gateway VLAN IP 
+  # dest_subnet is Destination subnet for static routing e.g. your AWS or GCP subnet
+  ROUTE_LIST: |
+    - route_ip: "192.168.0.1"
+      dest_subnet: "172.17.0.0/16"
+    - route_ip: "192.168.0.1"
+      dest_subnet: "10.102.0.0/16"
+    - route_ip: "192.168.0.1"
+      dest_subnet: "10.210.0.0/16"
 
   # Set to "false" if You don't want to attach the Firewall to LKE Cluster
   ENABLE_FIREWALL: "true"
 
   # Linode LKE Cluster ID (used for dynamic firewall attachment)
-  LKE_CLUSTER_ID: "496515"
+  LKE_CLUSTER_ID: "497104"
 
   # Primary subnet/Lindoe side VLAN interfaces subnet
   SUBNET: "192.168.0.0/16"
