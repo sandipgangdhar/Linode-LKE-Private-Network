@@ -62,45 +62,39 @@ data:
   # route_ip is Gateway IP for the subnet normally your NAT gateway VLAN IP 
   # dest_subnet is Destination subnet for static routing e.g. your AWS or GCP subnet
   ROUTE_LIST: |
-    - route_ip: "192.168.0.1"
-      dest_subnet: "172.17.0.0/16"
-    - route_ip: "192.168.0.1"
-      dest_subnet: "10.102.0.0/16"
-    - route_ip: "192.168.0.1"
-      dest_subnet: "10.210.0.0/16"
-    - route_ip: "192.168.0.1"
-      dest_subnet: "172.50.0.0/16"
-    - route_ip: "192.168.0.1"
-      dest_subnet: "10.3.0.0/16"
+    - route_ip: "172.16.0.1"
+      dest_subnet: "192.168.0.1/16"
+    - route_ip: "172.16.0.1"
+      dest_subnet: "10.1.0.0/16"
 
   # Set to "false" if You don't want to attach the Firewall to LKE Cluster
   ENABLE_FIREWALL: "true"
 
   # Linode LKE Cluster ID (used for dynamic firewall attachment)
-  LKE_CLUSTER_ID: "494622"
+  LKE_CLUSTER_ID: "497093"
 
   # Primary subnet/Lindoe side VLAN interfaces subnet
-  SUBNET: "192.168.0.0/16"
+  SUBNET: "172.16.0.0/12"
 
   # Linod Region Name 
   REGION: "in-maa"
 
   # VLAN label used in Linode VLAN configration
-  VLAN_LABEL: "hungama-prod-VLAN"
+  VLAN_LABEL: "Linode-AWS"
 
   # Path to the Kubeconfig file for managing Kubernetes
   KUBECONFIG: "/tmp/kubeconfig"
 
   # Path to the Kubeconfig file for managing Kubernetes
-  LINODE_API_KEY: "24198f43e6adfc5b8455cf174d74220efeb0604fd4a7eea846ed815f6d35ebcf"
+  LINODE_API_KEY: "dbe8ba8e2f3ddf8a7488e8f56152c9d7a931d0ae6a837a5916ee6d48654e3b55"
 
   # Linode CLI configuration details
   LINODE_CLI_CONFIG: |
       [DEFAULT]
-      default-user = sandip-dct
+      default-user = sgangdha
       
-      [sandip-dct]
-      token = 24198f43e6adfc5b8455cf174d74220efeb0604fd4a7eea846ed815f6d35ebcf
+      [sgangdha]
+      token = dbe8ba8e2f3ddf8a7488e8f56152c9d7a931d0ae6a837a5916ee6d48654e3b55
       region = in-maa
-      authorized_users = sandip-dct
+      authorized_users = sgangdha
       suppress-version-warning = true

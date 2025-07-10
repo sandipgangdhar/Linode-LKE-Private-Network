@@ -180,11 +180,23 @@ create_and_attach_firewall() {
         set -e
 
         if [[ $CREATE_STATUS -ne 0 || -z "$CREATE_OUTPUT" ]]; then
-            log "❌ Failed to create firewall $FIREWALL_LABEL. Sleeping indefinitely to avoid crashloop."
-            sleep infinity
+            log "⚠️ Firewall creation failed, checking if it was created by another node..."
+            log "⚠️ First let's give 60 sec to Linode for creation...."
+            sleep 60
+            set +e
+            FIREWALL_ID=$(linode-cli firewalls list --json | jq -r ".[] | select(.label==\"$FIREWALL_LABEL\") | .id")
+            set -e
+            if [[ -z "$FIREWALL_ID" ]]; then
+                log "❌ Firewall creation failed and it does not exist. Sleeping indefinitely."
+                sleep infinity
+            else
+                log "✅ Firewall was created by another process. Continuing with ID $FIREWALL_ID"
+            fi
+        else
+            FIREWALL_ID=$(linode-cli firewalls list --json | jq -r ".[] | select(.label==\"$FIREWALL_LABEL\") | .id")
+            log "✅ Firewall created with ID $FIREWALL_ID"
         fi
-
-        FIREWALL_ID=$(echo "$CREATE_OUTPUT" | jq -r '.[0].id')
+        FIREWALL_ID=$(linode-cli firewalls list --json | jq -r ".[] | select(.label==\"$FIREWALL_LABEL\") | .id")
         log "✅ Firewall created with ID $FIREWALL_ID"
     else
         log "✅ Firewall $FIREWALL_LABEL already exists with ID $FIREWALL_ID"
