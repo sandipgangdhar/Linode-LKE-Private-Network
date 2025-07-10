@@ -215,19 +215,27 @@ create_and_attach_firewall() {
         # Wait for firewall to be fully attached before proceeding
         ATTACH_WAIT_RETRIES=10
         ATTACH_WAIT_DELAY=5
+        ATTACH_CONFIRMED=false
         for i in $(seq 1 $ATTACH_WAIT_RETRIES); do
-            FIREWALL_DEVICE_STATUS=$(linode-cli firewalls devices-list "$FIREWALL_ID" --json | jq -r ".[] | select(.id == $LINODE_ID) | .status")
-            if [[ "$FIREWALL_DEVICE_STATUS" == "enabled" ]]; then
-                log "✅ Firewall attachment confirmed (status: enabled)"
+            set +e
+            linode-cli firewalls devices-list "$FIREWALL_ID" --json | jq --argjson lid "$LINODE_ID" -e '.[] | select(.entity.id == $lid)' > /dev/null
+            FIREWALL_DEVICE_STATUS=$?
+            set -e
+            if [[ "$FIREWALL_DEVICE_STATUS" -eq 0 ]]; then
+                ATTACH_CONFIRMED=true
+                log "✅ Firewall successfully attached to Linode ID $LINODE_ID"
+                log "🛡️ Firewall ENABLED – Firewall '$FIREWALL_LABEL' (ID: $FIREWALL_ID) successfully created/attached to instance."
+                log "✅ Firewall attachment complete. Continuing to finalize script execution..."
                 break
             else
                 log "⏳ Waiting for firewall to attach (attempt $i/$ATTACH_WAIT_RETRIES)..."
                 sleep "$ATTACH_WAIT_DELAY"
             fi
         done
-        log "✅ Firewall successfully attached to Linode ID $LINODE_ID"
-        log "🛡️ Firewall ENABLED – Firewall '$FIREWALL_LABEL' (ID: $FIREWALL_ID) successfully created/attached to instance."
-        log "✅ Firewall attachment complete. Continuing to finalize script execution..."
+        if [[ "$ATTACH_CONFIRMED" != true ]]; then
+            log "❌ Firewall did not attach within expected time for Linode ID $LINODE_ID"
+            sleep infinity
+        fi
     else
         log "❌ Failed to attach firewall to Linode ID $LINODE_ID. Sleeping indefinitely to avoid container restart loop."
         sleep infinity

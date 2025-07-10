@@ -68,12 +68,16 @@ data:
       dest_subnet: "10.102.0.0/16"
     - route_ip: "192.168.0.1"
       dest_subnet: "10.210.0.0/16"
+    - route_ip: "192.168.0.1"
+      dest_subnet: "172.50.0.0/16"
+    - route_ip: "192.168.0.1"
+      dest_subnet: "10.3.0.0/16"
 
   # Set to "false" if You don't want to attach the Firewall to LKE Cluster
   ENABLE_FIREWALL: "true"
 
   # Linode LKE Cluster ID (used for dynamic firewall attachment)
-  LKE_CLUSTER_ID: "497104"
+  LKE_CLUSTER_ID: "494622"
 
   # Primary subnet/Lindoe side VLAN interfaces subnet
   SUBNET: "192.168.0.0/16"
