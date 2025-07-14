@@ -62,55 +62,20 @@ spec:
       serviceAccountName: vlan-manager-sa
       containers:
         - name: vlan-ip-controller
-          image: python:3.9
+          image: ghcr.io/sandipgangdhar/linode-lke-private-network:latest
 
           resources:
             requests:
-              memory: "200Mi"
-              cpu: "250m"
-            limits:
-              memory: "500Mi"
+              memory: "1000Mi"
               cpu: "500m"
+            limits:
+              memory: "1500Mi"
+              cpu: "1000m"
 
           # Command to run the Flask API
           command: ["/bin/bash", "-c"]
           args: 
             - |
-
-              # === Install Python dependencies ===
-              pip install --upgrade pip && \
-              # === Check Installation ===
-              if ! command -v pip &> /dev/null; then
-                  echo "❌ pip command not found. Installation failed."
-                  exit 1
-              fi
-              pip install linode-cli && \
-              echo "✅ Linode CLI installed successfully."
-
-
-              # === Install System dependencies ===
-              apt-get update && apt-get install -y jq curl parallel net-tools&& \
-              echo "✅ Dependencies installed successfully."
-
-
-              # === Validate Installation ===
-              if ! command -v linode-cli &> /dev/null; then
-                  echo "❌ linode-cli command not found. Installation failed."
-                  exit 1
-              fi
-
-              # === Configure Linode CLI ===
-              mkdir -p /root/.linode-cli && \
-              echo "$LINODE_CLI_CONFIG" > /root/.linode-cli/linode-cli && \
-              chmod 600 /root/.linode-cli/* && \
-              export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli" && \
-              echo "✅ Linode CLI configuration completed."
-
-              # Install Flask and Flask-CORS
-              pip install flask flask-cors etcd3 requests filelock aiohttp psutil && \
-              pip install 'protobuf<4.0.0,>=3.20.0' && \
-              echo "✅ flask flask-cors etcd3 requests filelock aiohttp psutil installation completed."
-
               # Copy the script and prepare it for execution
               cp --dereference /root/scripts/06-rest-api.py /tmp/06-rest-api.py && \
               chmod u+x /tmp/06-rest-api.py && \
@@ -145,6 +110,8 @@ spec:
           volumeMounts:
             - name: vlan-manager-scripts
               mountPath: /root/scripts
+            - name: linode-cli-config
+              mountPath: /root/.linode-cli/
 
           # Suggested Liveness and Readiness probes (Optional but recommended)
           livenessProbe:
@@ -168,7 +135,12 @@ spec:
         - name: vlan-manager-scripts
           configMap:
             name: vlan-manager-scripts
-
+        - name: linode-cli-config
+          configMap:
+            name: vlan-manager-config
+            items:
+              - key: LINODE_CLI_CONFIG
+                path: linode-cli
 ---
 apiVersion: v1
 kind: Service

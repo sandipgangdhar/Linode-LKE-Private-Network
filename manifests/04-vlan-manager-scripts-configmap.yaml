@@ -52,12 +52,13 @@ data:
         
         # === Environment Variables ===
         # These variables are populated from Kubernetes ConfigMap or environment
-        export SUBNET="${SUBNET}"
+        SUBNET="${SUBNET}"
         export ROUTE_LIST="${ROUTE_LIST:-}"
-        export VLAN_LABEL="${VLAN_LABEL}"
-        export ENABLE_PUSH_ROUTE="$(echo "$ENABLE_PUSH_ROUTE" | tr '[:upper:]' '[:lower:]')"  # flag to control route pushing
-        export ENABLE_FIREWALL="$(echo "$ENABLE_FIREWALL" | tr '[:upper:]' '[:lower:]')" # flag to control FIREWALL Creation and attachment
-        export LKE_CLUSTER_ID="${LKE_CLUSTER_ID}"
+        VLAN_LABEL="${VLAN_LABEL}"
+        DEST_SUBNET="${DEST_SUBNET}"
+        ENABLE_PUSH_ROUTE="$(echo "$ENABLE_PUSH_ROUTE" | tr '[:upper:]' '[:lower:]')"  # flag to control route pushing
+        ENABLE_FIREWALL="$(echo "$ENABLE_FIREWALL" | tr '[:upper:]' '[:lower:]')" # flag to control FIREWALL Creation and attachment
+        LKE_CLUSTER_ID="${LKE_CLUSTER_ID}"
         
         # === Function to Log Events ===
         # This function logs events with a timestamp
@@ -66,6 +67,24 @@ data:
         }
         
         log "🔄 Starting VLAN Attachment Script..."
+
+        # 🧼 Cleanup old CoreDNS reboot lock if held by this node
+        REBOOT_LOCK_KEY="/coredns-reboot-lock"
+        CURRENT_NODE=$(hostname)
+        if [ -n "$ETCD_ENDPOINTS" ]; then
+            # Wait for etcd DNS to resolve
+            until nslookup etcd-0.etcd.kube-system.svc.cluster.local >/dev/null 2>&1; do
+                log "🌐 Waiting for DNS to resolve etcd-0 during lock cleanup..."
+                sleep 5
+            done
+        
+            # Check and delete the lock if this node owns it
+            LOCK_OWNER=$(etcdctl --endpoints "$ETCD_ENDPOINTS" get "$REBOOT_LOCK_KEY" --print-value-only 2>/dev/null)
+            if [[ "$LOCK_OWNER" == "$CURRENT_NODE" ]]; then
+                etcdctl --endpoints "$ETCD_ENDPOINTS" del "$REBOOT_LOCK_KEY"
+                log "🧹 Removed stale CoreDNS reboot lock held by $CURRENT_NODE"
+            fi
+        fi
         
         # === Function to check if VLAN is already attached ===
         is_vlan_attached() {
@@ -87,40 +106,31 @@ data:
                         ROUTE_IP=$(echo "$line" | awk -F': ' '{print $2}' | tr -d '"')
                     elif [[ "$line" =~ dest_subnet ]]; then
                         DEST_SUBNET=$(echo "$line" | awk -F': ' '{print $2}' | tr -d '"')
-                        
-                        # Ensure both values are present before continuing
+        
                         if [[ -z "$ROUTE_IP" || "$ROUTE_IP" == "0.0.0.0" || -z "$DEST_SUBNET" || "$DEST_SUBNET" == "0.0.0.0/0" ]]; then
-                            log "❌ Skipping invalid route: ROUTE_IP=$ROUTE_IP DEST_SUBNET=$DEST_SUBNET"
-                            unset ROUTE_IP DEST_SUBNET
-                            continue
+                            log "❌ ENABLE_PUSH_ROUTE is true, but ROUTE_IP or DEST_SUBNET is unset or invalid."
+                            log "🛑 Skipping route push and sleeping indefinitely to avoid container crash loop."
+                            sleep infinity
                         fi
         
-                        log "🔁 Processing Route: $DEST_SUBNET via $ROUTE_IP"
-                        log "📦 ENABLE_PUSH_ROUTE: $ENABLE_PUSH_ROUTE"
-                        log "📦 ROUTE_IP: $ROUTE_IP"
-                        log "📦 DEST_SUBNET: $DEST_SUBNET"
+                        log "Checking the VLAN_INTERFACE..."
+                        # Extract the VLAN IP
+                        VLAN_IP=$(linode-cli linodes config-view "$LINODE_ID" "$CONFIG_ID" --json | jq -r '.[0].interfaces[1].ipam_address // empty')
         
-                        if [ "$DEST_SUBNET" == "172.17.0.0/16" ]; then
-                            log "Checking if the default LKE route for $DEST_SUBNET exists"
-                            set +e
-                            ip route show | grep -q "$DEST_SUBNET"
-                            DEFAULT_LKE_ROUTE_STATUS=$?
-                            set -e
+                        # Extract the IP portion (strip subnet)
+                        VLAN_IP_ADDR=$(echo "$VLAN_IP" | cut -d'/' -f1)
+                        log "VLAN IP is $VLAN_IP_ADDR..."
+                        VLAN_INTERFACE=$(ip -o addr | awk -v ip="$VLAN_IP_ADDR" '$0 ~ ip {print $2; exit}')
+                        log "📦 VLAN interface value is: $VLAN_INTERFACE"
         
-                            if [ $DEFAULT_LKE_ROUTE_STATUS -eq 0 ]; then
-                                log "✅ Default LKE Route for $DEST_SUBNET already exists. Deleting it now."
-                                set +e
-                                ip route delete 172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1
-                                DELETE_STATUS=$?
-                                set -e
-        
-                                if [ $DELETE_STATUS -eq 0 ]; then
-                                    log "✅ Default LKE Route for $DEST_SUBNET successfully deleted..."
-                                else
-                                    log "⚠️ Failed to delete default LKE route for $DEST_SUBNET. Please check it..."
-                                fi
-                            fi
+                        if [[ -z "$VLAN_INTERFACE" ]]; then
+                            log "❌ Could not resolve VLAN interface for IP $VLAN_IP. Sleeping indefinitely..."
+                            sleep infinity
                         fi
+        
+                        log "📦 ENABLE_PUSH_ROUTE value is: $ENABLE_PUSH_ROUTE"
+                        log "📦 ROUTE_IP value is: $ROUTE_IP"
+                        log "📦 DEST_SUBNET value is: $DEST_SUBNET"
         
                         log "Checking if route already exists for $DEST_SUBNET..."
                         set +e
@@ -131,23 +141,20 @@ data:
                         if [ $STATUS -eq 0 ]; then
                             log "✅ Route $DEST_SUBNET already exists. Skipping addition."
                         else
-                            log "⚙️ Adding route $DEST_SUBNET via $ROUTE_IP on eth1..."
+                            log "⚙️  Adding route $DEST_SUBNET via $ROUTE_IP on $VLAN_INTERFACE..."
                             set +e
-                            ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev eth1
+                            ip route add "$DEST_SUBNET" via "$ROUTE_IP" dev $VLAN_INTERFACE
                             ADD_STATUS=$?
                             set -e
         
                             if [ $ADD_STATUS -eq 0 ]; then
                                 log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to eth1."
                             else
-                                log "⚠️ Failed to add route $DEST_SUBNET via $ROUTE_IP. It may already exist or be invalid."
+                                log "⚠️  Failed to add route $DEST_SUBNET via $ROUTE_IP. It may already exist."
                             fi
                         fi
-        
-                        # Reset variables for next block
-                        unset ROUTE_IP DEST_SUBNET
-                    fi
-                done
+                    fi  
+                done   
             else
                 log "ℹ️ Skipping route push as ENABLE_PUSH_ROUTE is set to false."
             fi
@@ -291,8 +298,17 @@ data:
         
         # === Discover Linode ID and Configuration ID ===
         # Linode API calls to find the instance ID and its configuration ID
-        LINODE_ID=$(kubectl get node "$(hostname)" -o json | jq -r '.spec.providerID' | cut -d '/' -f3)
+        LINODE_ID=$(linode-cli linodes list --json | jq -r --arg ip "$PUBLIC_IP" '.[] | select(.ipv4[] == $ip) | .id')
         CONFIG_ID=$(linode-cli linodes configs-list $LINODE_ID --json | jq -r '.[0].id')
+
+        # Checking If the Linode ID or Config ID is found Correctly, retry after 60 seconds
+        MATCH_COUNT=$(echo "$LINODE_ID" | wc -w)
+        if [[ "$MATCH_COUNT" -ne 1 ]]; then
+            log "❌ Ambiguous or no Linode match found for IP $PUBLIC_IP (Count: $MATCH_COUNT). Aborting."
+            sleep 60
+            /tmp/02-script-vlan-attach.sh
+            exit 1
+        fi
         
         # If either the Linode ID or Config ID is not found, retry after 60 seconds
         if [ -z "$LINODE_ID" ] || [ -z "$CONFIG_ID" ]; then
@@ -366,21 +382,122 @@ data:
         log "⚙️  Attaching VLAN interface to Linode instance..."
         linode-cli linodes config-update "$LINODE_ID" "$CONFIG_ID" --interfaces "$INTERFACES_JSON" --label "Boot Config"
         
-        # === Check Success ===
+        # === Check VLAN is attached after attachment and firewall ===
         if is_vlan_attached; then
-            log "✅ VLAN successfully attached."
-            create_and_attach_firewall
+            log "✅ VLAN is successfully attached now. Proceeding to reboot for changes to take effect..."
+        
             touch /tmp/rebooting
-            log "Rebooting Linode after firewall confirmed attached..."
-            linode-cli linodes reboot "$LINODE_ID"
+        
+            REBOOT_LOCK_KEY="/coredns-reboot-lock"
+            CURRENT_NODE=$(hostname)
+            export ETCDCTL_API=3
+        
+            if [ -z "$ETCD_ENDPOINTS" ]; then
+                log "❌ ETCD_ENDPOINTS not set. Aborting reboot!"
+                sleep infinity
+            fi
+        
+            log "🔍 Checking if this node is hosting a CoreDNS pod..."
+            set +e
+            COREDNS_HOST=$(kubectl get pods -n kube-system -o json | jq -r \
+                '.items[] | select(.metadata.labels["k8s-app"] == "kube-dns") | .spec.nodeName' \
+                | grep -w "$CURRENT_NODE")
+            KUBE_EXIT=$?
+            set -e 
+           
+            if [[ "$KUBE_EXIT" -ne 0 ]]; then
+                log "⚠️ Failed to fetch CoreDNS pod status. Assuming no CoreDNS on this node. Proceeding with immediate reboot."
+            fi
+        
+            if [[ -n "$COREDNS_HOST" ]]; then
+                log "🧠 $CURRENT_NODE is hosting a CoreDNS pod. Serialized reboot enabled."
+        
+                ACQUIRED=false
+                while [[ "$ACQUIRED" != true ]]; do
+                    # Wait for DNS to resolve etcd
+                    until nslookup etcd-0.etcd.kube-system.svc.cluster.local >/dev/null 2>&1; do
+                        log "🌐 Waiting for DNS to resolve etcd-0..."
+                        sleep 5
+                    done
+                    # Retry etcdctl get if it fails due to timeout or DNS
+                    MAX_ETCD_RETRIES=10
+                    ETCD_RETRY_DELAY=20
+                    RETRY_COUNT=0
+                    while true; do
+                        set +e
+                        PREV=$(etcdctl --endpoints "$ETCD_ENDPOINTS" get "$REBOOT_LOCK_KEY" --print-value-only 2>/tmp/etcd_err.log)
+                        EXIT_CODE=$?
+                        set -e
+                    
+                        if [[ "$EXIT_CODE" -eq 0 ]]; then
+                            break
+                        else
+                            log "⚠️ etcdctl get failed (retry $((RETRY_COUNT+1))/$MAX_ETCD_RETRIES): $(cat /tmp/etcd_err.log)"
+                            RETRY_COUNT=$((RETRY_COUNT + 1))
+                            if [[ $RETRY_COUNT -ge $MAX_ETCD_RETRIES ]]; then
+                                log "❌ etcdctl failed after $MAX_ETCD_RETRIES attempts. Sleeping indefinitely..."
+                                sleep infinity
+                            fi
+                            sleep "$ETCD_RETRY_DELAY"
+                        fi
+                    done
+                    if [[ -z "$PREV" ]]; then
+                        set +e
+                        etcdctl --endpoints "$ETCD_ENDPOINTS" put "$REBOOT_LOCK_KEY" "$CURRENT_NODE" --prev-kv
+                        ETCD_PUT_LOCK_STATUS=$?
+                        set -e
+                        if [[ "$ETCD_PUT_LOCK_STATUS" -eq 0 ]]; then
+                            log "🔒 Lock acquired by $CURRENT_NODE for CoreDNS reboot."
+                            ACQUIRED=true
+                        else
+                           log "⛔ I tried to put the value. Lock held by another node. Waiting for release..."
+                           sleep 10
+                        fi
+                    else
+                        log "⛔ Lock held by $PREV. Waiting for release..."
+                        sleep 10
+                    fi
+                done
+            else
+                log "🚀 This node is NOT hosting a CoreDNS pod. Rebooting immediately..."
+            fi
+        
+            # === Reboot logic ===
+            log "🔁 Initiating reboot via Linode CLI..."
+            RETRY=0
+            MAX_RETRIES=10
+        
+            while true; do
+                set +e
+                linode-cli linodes reboot "$LINODE_ID"
+                EXIT_CODE=$?
+                set -e
+        
+                if [[ "$EXIT_CODE" -eq 0 ]]; then
+                    log "✅ Reboot command succeeded."
+                    break
+                else
+                    log "⚠️ Reboot failed (possibly Linode busy). Retrying in 5s... ($((RETRY+1))/$MAX_RETRIES)"
+                    RETRY=$((RETRY + 1))
+                    if [[ $RETRY -ge $MAX_RETRIES ]]; then
+                        log "❌ Reboot failed after $MAX_RETRIES attempts. Sleeping indefinitely."
+                        sleep infinity
+                    fi
+                    sleep 5
+                fi
+            done
+        
+            # Safety net if reboot doesn't happen
+            sleep 300
+            log "⚠️ Node did not reboot as expected. Sleeping to avoid loop."
             sleep infinity
         else
-            log "❌ VLAN configuration failed. Retrying in 60 seconds..."
+            log "❌ VLAN check failed after config. Retrying in 60s..."
             sleep 60
             /tmp/02-script-vlan-attach.sh
-            exit 0
+            exit 1
         fi
-        
+
         # === Cleanup Logic ===
         cleanup() {
             if [ -f "/tmp/rebooting" ]; then
@@ -399,6 +516,7 @@ data:
         log "🟢 VLAN and Firewall configuration steps completed successfully."
         log "🛌 Script execution complete. Sleeping indefinitely..."
         sleep infinity
+
   03-script-ip-allocate.sh: |
         #!/bin/bash
         # Exit on error

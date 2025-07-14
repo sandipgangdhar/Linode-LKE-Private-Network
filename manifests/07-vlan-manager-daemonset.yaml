@@ -66,7 +66,7 @@ spec:
 
       containers:
         - name: vlan-manager
-          image: python:3.9
+          image: ghcr.io/sandipgangdhar/linode-lke-private-network:latest
 
           # Security context to allow privileged VLAN operations
           securityContext:
@@ -76,58 +76,9 @@ spec:
           command: ["/bin/bash", "-c"]
           args: 
             - |
+              echo "⏳ Waiting 60 seconds for DNS and Kubernetes API to stabilize..."
+              sleep 60
               echo "🔄 Starting VLAN Manager Setup..."
-
-              # === Install Dependencies with Retry Logic ===
-              for i in {1..5}; do
-                apt-get update && break
-                echo "❌ apt-get update failed. Retrying in 5s... ($i/5)"
-                sleep 5
-              done
-              apt-get install -y jq apt-transport-https ca-certificates curl net-tools iproute2 && \
-              echo "✅ Dependencies installed successfully."
-
-              # === Validate Installation ===
-              if ! command -v ip &> /dev/null; then
-                  echo "❌ ip command not found. Installation failed."
-                  exit 1
-              fi
-
-              if ! command -v ifconfig &> /dev/null; then
-                  echo "❌ net-tools package not found. Installation failed."
-                  exit 1
-              fi
-
-              if ! command -v jq &> /dev/null; then
-                  echo "❌ jq command not found. Installation failed."
-                  exit 1
-              fi
-
-              # === Install kubectl ===
-              curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
-              chmod +x kubectl && mv kubectl /usr/local/bin/kubectl && \
-              echo "✅ kubectl installed successfully."
-              # === Check Installation ===
-              if ! command -v kubectl &> /dev/null; then
-                  echo "❌ kubectl command not found. Installation failed."
-                  exit 1
-              fi
-
-              # === Install Python dependencies ===
-              pip install --upgrade pip && \
-              # === Check Installation ===
-              if ! command -v pip &> /dev/null; then
-                  echo "❌ pip command not found. Installation failed."
-                  exit 1
-              fi
-              pip install linode-cli && \
-              echo "✅ Linode CLI installed successfully."
-
-              # === Validate Installation ===
-              if ! command -v linode-cli &> /dev/null; then
-                  echo "❌ linode-cli command not found. Installation failed."
-                  exit 1
-              fi
 
               # === Configure Linode CLI ===
               mkdir -p /root/.linode-cli && \
@@ -175,8 +126,8 @@ spec:
               # === Execute VLAN Attachment Script ===
               echo "🚀 Starting VLAN Attachment Script..."
               /tmp/02-script-vlan-attach.sh
-              echo "🛌 Script execution complete. Sleeping indefinitely..."
-              sleep infinity
+              #echo "🛌 Script execution complete. Sleeping indefinitely..."
+              #sleep infinity
 
           # Environment variables
           env:
@@ -220,6 +171,8 @@ spec:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: LKE_CLUSTER_ID
+            - name: ETCD_ENDPOINTS
+              value: "${ETCD_ENDPOINTS}"
           # Volume mounts for scripts
           volumeMounts:
             - name: vlan-manager-scripts

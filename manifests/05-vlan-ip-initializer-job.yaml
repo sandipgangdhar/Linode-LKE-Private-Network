@@ -55,7 +55,7 @@ spec:
     spec:
       containers:
       - name: vlan-ip-initializer
-        image: ubuntu:latest
+        image: ghcr.io/sandipgangdhar/linode-lke-private-network:latest
         # Command and Arguments
         command: ["/bin/bash", "-c"]
         args:
@@ -64,15 +64,7 @@ spec:
             echo "[DEBUG] Exporting environment variables..."
             echo "[DEBUG] ENV SUBNET=$SUBNET REGION=$REGION"
         
-            mkdir -p /mnt/vlan-ip && \
-            apt-get update && \
-            DEBIAN_FRONTEND=noninteractive apt-get install -y python3 jq curl parallel ca-certificates && \
-            curl -L https://github.com/etcd-io/etcd/releases/download/v3.5.12/etcd-v3.5.12-linux-amd64.tar.gz -o etcd.tar.gz && \
-            tar xzf etcd.tar.gz --strip-components=1 -C /usr/local/bin etcd-v3.5.12-linux-amd64/etcdctl && \
-            chmod +x /usr/local/bin/etcdctl && \
-            echo "✅ etcdctl installed."
-        
-            mkdir -p /root/.linode-cli && \
+            [ ! -d /root/.linode-cli ] && mkdir -p /root/.linode-cli && \
             echo "$LINODE_CLI_CONFIG" > /root/.linode-cli/linode-cli && \
             chmod 600 /root/.linode-cli/* && \
             export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"

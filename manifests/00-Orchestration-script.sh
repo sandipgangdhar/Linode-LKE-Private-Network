@@ -102,6 +102,23 @@ Apply_etcd_endpoint_vlan_ip_controller_deployment() {
     fi
 }
 
+# === setting the etcd endpoint in vlan-manager daemonset based on node count ===
+Create_vlan_manager_daemonset() {
+    NODE_COUNT=$(get_worker_node_count)
+    log "📊 Detected $NODE_COUNT worker node(s) in the cluster."
+
+    if [ "$NODE_COUNT" -lt 3 ]; then
+        log "🚦 Node count <$NODE_COUNT> is less than 3 setting the etcd endpoint accordingly..."
+        export ETCD_ENDPOINTS="http://etcd-0.etcd.kube-system.svc.cluster.local:2379"
+        envsubst '${ETCD_ENDPOINTS}' < 07-vlan-manager-daemonset.yaml | kubectl apply -f -
+        unset ETCD_ENDPOINTS
+    else
+        log "🚀 Node count is $NODE_COUNT setting the etcd endpoint accordingly..."
+        export ETCD_ENDPOINTS="http://etcd-0.etcd.kube-system.svc.cluster.local:2379,http://etcd-1.etcd.kube-system.svc.cluster.local:2379,http://etcd-2.etcd.kube-system.svc.cluster.local:2379"
+        envsubst '${ETCD_ENDPOINTS}' < 07-vlan-manager-daemonset.yaml | kubectl apply -f -
+        unset ETCD_ENDPOINTS
+    fi
+}
 
 # === Step 1: Apply StorageClass ===
 echo "🔄 Checking for existing Linode Block StorageClass..."
@@ -204,7 +221,7 @@ fi
 
 # === Step 7: Deploy VLAN Manager DaemonSet ===
 echo "🚀 Deploying VLAN Manager DaemonSet..."
-kubectl apply -f 07-vlan-manager-daemonset.yaml || exit 1
+Create_vlan_manager_daemonset
 
 # Wait for DaemonSet rollout
 echo "⏳ Waiting for VLAN Manager DaemonSet to be ready..."
