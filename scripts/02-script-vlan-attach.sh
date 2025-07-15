@@ -54,6 +54,15 @@ log() {
 
 log "🔄 Starting VLAN Attachment Script..."
 
+# Wait for DNS to resolve
+function wait_for_dns() {
+    while ! nslookup api.linode.com >/dev/null 2>&1; do
+        log "🌐 DNS resolution failed. Retrying in 10 seconds..."
+        sleep 10
+    done
+    log "✅ DNS resolution successful."
+}
+
 # 🧼 Cleanup old CoreDNS reboot lock if held by this node
 REBOOT_LOCK_KEY="/coredns-reboot-lock"
 CURRENT_NODE=$(hostname)
@@ -74,6 +83,7 @@ fi
 
 # === Function to check if VLAN is already attached ===
 is_vlan_attached() {
+    wait_for_dns ⏳ Ensure DNS is up before calling Linode API
     VLAN_STATUS=$(linode-cli linodes config-view "$LINODE_ID" "$CONFIG_ID" --json | jq -r '.[0].interfaces[1].purpose // empty')
     if [ "$VLAN_STATUS" == "vlan" ]; then
         return 0
@@ -101,6 +111,7 @@ push_route() {
 
                 log "Checking the VLAN_INTERFACE..."
                 # Extract the VLAN IP
+                wait_for_dns ⏳ Ensure DNS is up before calling Linode API
                 VLAN_IP=$(linode-cli linodes config-view "$LINODE_ID" "$CONFIG_ID" --json | jq -r '.[0].interfaces[1].ipam_address // empty')
 
                 # Extract the IP portion (strip subnet)
@@ -157,12 +168,14 @@ create_and_attach_firewall() {
     log "🔍 Checking if firewall '$FIREWALL_LABEL' already exists..."
 
     set +e
+    wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
     FIREWALL_ID=$(linode-cli firewalls list --json 2>/dev/null | jq -r ".[] | select(.label==\"$FIREWALL_LABEL\") | .id")
     set -e
 
     if [[ -z "$FIREWALL_ID" ]]; then
         log "🚀 Creating new firewall with label $FIREWALL_LABEL..."
         set +e
+        wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
         CREATE_OUTPUT=$(linode-cli firewalls create \
           --label "$FIREWALL_LABEL" \
           --rules.inbound='[
@@ -191,6 +204,7 @@ create_and_attach_firewall() {
             log "⚠️ First let's give 60 sec to Linode for creation...."
             sleep 60
             set +e
+            wait_for_dns # ⏳ Ensure DNS is up before calling Linode AP
             FIREWALL_ID=$(linode-cli firewalls list --json | jq -r ".[] | select(.label==\"$FIREWALL_LABEL\") | .id")
             set -e
             if [[ -z "$FIREWALL_ID" ]]; then
@@ -200,9 +214,11 @@ create_and_attach_firewall() {
                 log "✅ Firewall was created by another process. Continuing with ID $FIREWALL_ID"
             fi
         else
+            wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
             FIREWALL_ID=$(linode-cli firewalls list --json | jq -r ".[] | select(.label==\"$FIREWALL_LABEL\") | .id")
             log "✅ Firewall created with ID $FIREWALL_ID"
         fi
+        wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
         FIREWALL_ID=$(linode-cli firewalls list --json | jq -r ".[] | select(.label==\"$FIREWALL_LABEL\") | .id")
         log "✅ Firewall created with ID $FIREWALL_ID"
     else
@@ -211,10 +227,12 @@ create_and_attach_firewall() {
 
     # Check if any firewall is already attached to this Linode
     log "🔍 Verifying if Linode ID $LINODE_ID already has any firewall attached..."
+    wait_for_dns ⏳ Ensure DNS is up before calling Linode API
     FIREWALLS_WITH_ENTITIES=$(linode-cli firewalls list --json | jq -r '.[] | select(.entities != null) | @base64')
     for fw in $FIREWALLS_WITH_ENTITIES; do
         _jq() { echo "$fw" | base64 --decode | jq -r "$1"; }
         FW_ID=$(_jq '.id')
+        wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
         ENTITY_IDS=$(linode-cli firewalls view "$FW_ID" --json | jq -r '.[0].entities[]?.id')
         for id in $ENTITY_IDS; do
             if [[ "$id" == "$LINODE_ID" ]]; then
@@ -226,6 +244,7 @@ create_and_attach_firewall() {
 
     log "🔗 Attaching firewall $FIREWALL_LABEL to Linode instance $LINODE_ID..."
     set +e
+    wait_for_dns ⏳ Ensure DNS is up before calling Linode API
     linode-cli firewalls device-create "$FIREWALL_ID" --type linode --id "$LINODE_ID"
     ATTACH_STATUS=$?
     set -e
@@ -237,6 +256,7 @@ create_and_attach_firewall() {
         ATTACH_CONFIRMED=false
         for i in $(seq 1 $ATTACH_WAIT_RETRIES); do
             set +e
+            wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
             linode-cli firewalls devices-list "$FIREWALL_ID" --json | jq --argjson lid "$LINODE_ID" -e '.[] | select(.entity.id == $lid)' > /dev/null
             FIREWALL_DEVICE_STATUS=$?
             set -e
@@ -261,6 +281,7 @@ create_and_attach_firewall() {
     fi
 }
 
+
 # === Discover Node IP and Name ===
 # Retrieve the IP address of eth0 (assumed to be the main interface)
 log "🌐 Fetching NODE IP of the instance..."
@@ -284,7 +305,9 @@ export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
 
 # === Discover Linode ID and Configuration ID ===
 # Linode API calls to find the instance ID and its configuration ID
+wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
 LINODE_ID=$(linode-cli linodes list --json | jq -r --arg ip "$PUBLIC_IP" '.[] | select(.ipv4[] == $ip) | .id')
+wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
 CONFIG_ID=$(linode-cli linodes configs-list $LINODE_ID --json | jq -r '.[0].id')
 
 # Checking If the Linode ID or Config ID is found Correctly, retry after 60 seconds
@@ -366,6 +389,7 @@ echo $INTERFACES_JSON | jq .
 
 # === Attach the VLAN interface ===
 log "⚙️  Attaching VLAN interface to Linode instance..."
+wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
 linode-cli linodes config-update "$LINODE_ID" "$CONFIG_ID" --interfaces "$INTERFACES_JSON" --label "Boot Config"
 
 # === Check VLAN is attached after attachment and firewall ===
@@ -455,6 +479,7 @@ if is_vlan_attached; then
 
     while true; do
         set +e
+        wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
         linode-cli linodes reboot "$LINODE_ID"
         EXIT_CODE=$?
         set -e
