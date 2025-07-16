@@ -92,10 +92,89 @@ is_vlan_attached() {
     fi
 }
 
+# Function: Detect Configured-But-Missing VLAN Interface and Trigger Reboot
+function handle_vlan_configured_but_missing_interface() {
+    set +e
+    wait_for_dns
+    VLAN_ATTACHED=$(linode-cli linodes config-view "$LINODE_ID" "$CONFIG_ID" --json | jq -r '.[0].interfaces[1].purpose // empty')
+    set -e
+    if [[ "$VLAN_ATTACHED" == "vlan" ]]; then
+        set +e
+        wait_for_dns
+        VLAN_IP=$(linode-cli linodes config-view "$LINODE_ID" "$CONFIG_ID" --json | jq -r '.[0].interfaces[1].ipam_address // empty')
+        set -e
+        wait_for_dns
+        VLAN_INTERFACE=$(ip -o addr show | grep "$VLAN_IP" | awk '{print $2}' | head -n1)
+
+        if [[ -z "$VLAN_INTERFACE" ]]; then
+            log "⚠️ VLAN is attached in config but the interface is missing. Reboot is likely pending from previous run."
+
+            # === Reboot logic ===
+            log "🔁 Initiating reboot via Linode CLI to apply VLAN changes..."
+            RETRY=0
+            MAX_RETRIES=10
+
+            while true; do
+                set +e
+                wait_for_dns
+                linode-cli linodes reboot "$LINODE_ID"
+                EXIT_CODE=$?
+                set -e
+
+                if [[ "$EXIT_CODE" -eq 0 ]]; then
+                    log "✅ Reboot command succeeded."
+                    break
+                else
+                    log "⚠️ Reboot failed (possibly Linode busy). Retrying in 5s... ($((RETRY+1))/$MAX_RETRIES)"
+                    RETRY=$((RETRY + 1))
+                    if [[ $RETRY -ge $MAX_RETRIES ]]; then
+                        log "❌ Reboot failed after $MAX_RETRIES attempts. Sleeping indefinitely."
+                        sleep infinity
+                    fi
+                    sleep 5
+                fi
+            done
+
+            # Give time for reboot to take effect
+            sleep 300
+            log "⚠️ Node did not reboot as expected. Sleeping to avoid loop."
+            sleep infinity
+        fi
+    fi
+}
+
 # === Function to push the route ===
 push_route() {
     if [[ "$ENABLE_PUSH_ROUTE" == "true" ]]; then
         echo "📦 Parsing ROUTE_LIST from ConfigMap..."
+        # 🌐 Check if any DEST_SUBNET is 172.17.0.0/16 and delete default Docker route if needed
+        log "🔍 Scanning ROUTE_LIST to see if 172.17.0.0/16 is present..."
+
+        if echo "$ROUTE_LIST" | grep -q 'dest_subnet: "172.17.0.0/16"'; then
+            log "⚠️ Found route for 172.17.0.0/16 in ROUTE_LIST. Checking and deleting LKE Docker route if exists..."
+
+            set +e
+            ip route show | grep -q "^172.17.0.0/16.*docker0"
+            DEFAULT_LKE_ROUTE_STATUS=$?
+            set -e
+
+            if [ $DEFAULT_LKE_ROUTE_STATUS -eq 0 ]; then
+                set +e
+                ip route delete 172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1
+                DELETE_STATUS=$?
+                set -e
+
+                if [ $DELETE_STATUS -eq 0 ]; then
+                    log "✅ Default LKE Docker Route for 172.17.0.0/16 successfully deleted"
+                else
+                    log "⚠️ Failed to delete LKE Docker route for 172.17.0.0/16. Please verify manually."
+                fi
+            else
+                log "✅ No LKE Docker route for 172.17.0.0/16 found. Nothing to delete."
+            fi
+        else
+            log "✅ ROUTE_LIST does not contain 172.17.0.0/16. Skipping Docker route check."
+        fi
 
         echo "$ROUTE_LIST" | while read -r line; do
             if [[ "$line" =~ route_ip ]]; then
@@ -108,6 +187,10 @@ push_route() {
                     log "🛑 Skipping route push and sleeping indefinitely to avoid container crash loop."
                     sleep infinity
                 fi
+                log "🔁 Processing Route: $DEST_SUBNET via $ROUTE_IP"
+                log "📦 ENABLE_PUSH_ROUTE: $ENABLE_PUSH_ROUTE"
+                log "📦 ROUTE_IP: $ROUTE_IP"
+                log "📦 DEST_SUBNET: $DEST_SUBNET"
 
                 log "Checking the VLAN_INTERFACE..."
                 # Extract the VLAN IP
@@ -305,8 +388,26 @@ export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
 
 # === Discover Linode ID and Configuration ID ===
 # Linode API calls to find the instance ID and its configuration ID
-wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
-LINODE_ID=$(linode-cli linodes list --json | jq -r --arg ip "$PUBLIC_IP" '.[] | select(.ipv4[] == $ip) | .id')
+MAX_PAGES=50
+LINODE_ID=""
+TARGET_IP="$PUBLIC_IP"
+
+for page in $(seq 1 $MAX_PAGES); do
+    log "🔍 Searching Linode list: Page $page"
+    wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
+    result=$(linode-cli linodes list --page $page --page-size 100 --json)
+    LINODE_ID=$(echo "$result" | jq -r --arg ip "$TARGET_IP" '.[] | select(.ipv4[]? == $ip) | .id')
+
+    if [[ -n "$LINODE_ID" ]]; then
+        log "✅ Found Linode with IP $TARGET_IP. LINODE_ID: $LINODE_ID"
+        break
+    fi
+done
+
+if [[ -z "$LINODE_ID" ]]; then
+    log "❌ Failed to find Linode with public IP $TARGET_IP in $MAX_PAGES pages."
+    exit 1
+fi
 wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
 CONFIG_ID=$(linode-cli linodes configs-list $LINODE_ID --json | jq -r '.[0].id')
 
@@ -330,6 +431,7 @@ fi
 log "✅ Linode ID: $LINODE_ID, Config ID: $CONFIG_ID"
 
 # === Main Logic ===
+handle_vlan_configured_but_missing_interface
 log "🔎 Checking if VLAN is already attached to Linode instance $LINODE_ID..."
 if is_vlan_attached; then
     log "✅ VLAN is already attached. Skipping VLAN configuration and directly pushing the route."
