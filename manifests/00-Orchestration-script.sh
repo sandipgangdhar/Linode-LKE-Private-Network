@@ -146,29 +146,29 @@ echo "✅ ETCD deployment initiated based on node count."
 deploy_etcd_cluster
 
 echo "⏳ Waiting for etcd pods to be registered in Kubernetes..."
-for i in {1..10}; do
+while true; do
     etcd_pods=$(kubectl get pods -n kube-system -l app=etcd --no-headers 2>/dev/null | wc -l)
     if [ "$etcd_pods" -ge 1 ]; then
         echo "✅ etcd pods found: $etcd_pods"
         break
     fi
-    echo "🔄 etcd pods not found yet. Retrying in 5 seconds... ($i/10)"
-    sleep 10
+    echo "🔄 etcd pods not found yet. Retrying in 5 seconds..."
+    sleep 5
 done
 
 echo "⏳ Waiting for all etcd pods to become Ready..."
-for i in {1..24}; do
+while true; do
     not_ready=$(kubectl get pods -n kube-system -l app=etcd --field-selector=status.phase!=Running --no-headers | wc -l)
     ready_count=$(kubectl get pods -n kube-system -l app=etcd --field-selector=status.phase=Running --no-headers | grep '1/1' | wc -l)
     total=$(kubectl get pods -n kube-system -l app=etcd --no-headers 2>/dev/null | wc -l)
-    
+
     if [ "$total" -eq "$ready_count" ] && [ "$total" -gt 0 ]; then
-        echo "✅ All etcd pods are Ready."
+        echo "✅ All etcd pods are Ready. Total: $total"
         break
     fi
 
-    echo "🔄 etcd pods not ready yet. Retrying in 5 seconds... ($i/24)"
-    sleep 10
+    echo "🔄 etcd pods not ready yet. Ready: $ready_count / Total: $total. Retrying in 5 seconds..."
+    sleep 5
 done
 
 # === Step 5: Apply Initializer Job ===
