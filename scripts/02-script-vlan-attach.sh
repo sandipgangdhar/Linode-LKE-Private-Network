@@ -98,6 +98,7 @@ function handle_vlan_configured_but_missing_interface() {
     wait_for_dns
     VLAN_ATTACHED=$(linode-cli linodes config-view "$LINODE_ID" "$CONFIG_ID" --json | jq -r '.[0].interfaces[1].purpose // empty')
     set -e
+
     if [[ "$VLAN_ATTACHED" == "vlan" ]]; then
         set +e
         wait_for_dns
@@ -108,6 +109,76 @@ function handle_vlan_configured_but_missing_interface() {
 
         if [[ -z "$VLAN_INTERFACE" ]]; then
             log "⚠️ VLAN is attached in config but the interface is missing. Reboot is likely pending from previous run."
+
+            CURRENT_NODE=$(hostname)
+            REBOOT_LOCK_KEY="/coredns-reboot-lock"
+            ETCD_URL="http://etcd-0.etcd.kube-system.svc.cluster.local:2379"
+
+            log "🔍 Checking if this node is hosting a CoreDNS pod..."
+            set +e
+            COREDNS_HOST=$(kubectl get pods -n kube-system -o json | jq -r \
+                '.items[] | select(.metadata.labels["k8s-app"] == "kube-dns") | .spec.nodeName' \
+                | grep -w "$CURRENT_NODE")
+            KUBE_EXIT=$?
+            set -e
+
+            if [[ "$KUBE_EXIT" -ne 0 || -z "$COREDNS_HOST" ]]; then
+                log "🚀 This node is NOT hosting a CoreDNS pod. Rebooting immediately..."
+            else
+                log "🧠 $CURRENT_NODE is hosting a CoreDNS pod. Serialized reboot enabled."
+
+                ACQUIRED=false
+                while [[ "$ACQUIRED" != true ]]; do
+                    until nslookup etcd-0.etcd.kube-system.svc.cluster.local >/dev/null 2>&1; do
+                        log "🌐 Waiting for DNS to resolve etcd-0..."
+                        sleep 5
+                    done
+
+                    log "🔒 Attempting atomic lock via etcd transaction..."
+
+                    TXN_PAYLOAD=$(cat <<EOF
+{
+  "compare": [
+    {
+      "key": "$(echo -n "$REBOOT_LOCK_KEY" | base64)",
+      "target": "VERSION",
+      "result": "EQUAL",
+      "version": "0"
+    }
+  ],
+  "success": [
+    {
+      "requestPut": {
+        "key": "$(echo -n "$REBOOT_LOCK_KEY" | base64)",
+        "value": "$(echo -n "$CURRENT_NODE" | base64)"
+      }
+    }
+  ],
+  "failure": [
+    {
+      "requestRange": {
+        "key": "$(echo -n "$REBOOT_LOCK_KEY" | base64)"
+      }
+    }
+  ]
+}
+EOF
+)
+
+                    RESPONSE=$(curl -s -X POST "$ETCD_URL/v3/kv/txn" \
+                        -H "Content-Type: application/json" \
+                        -d "$TXN_PAYLOAD")
+
+                    if echo "$RESPONSE" | grep -q '"succeeded":true'; then
+                        log "✅ Lock acquired by $CURRENT_NODE for CoreDNS reboot."
+                        ACQUIRED=true
+                    else
+                        HOLDER=$(echo "$RESPONSE" | jq -r '.responses[0].response_range.kvs[0].value' | base64 -d)
+                        log "⛔ Lock held by $HOLDER. Waiting 10s before retry..."
+                        sleep 10
+                    fi
+                done
+            fi
 
             # === Reboot logic ===
             log "🔁 Initiating reboot via Linode CLI to apply VLAN changes..."
@@ -135,7 +206,6 @@ function handle_vlan_configured_but_missing_interface() {
                 fi
             done
 
-            # Give time for reboot to take effect
             sleep 300
             log "⚠️ Node did not reboot as expected. Sleeping to avoid loop."
             sleep infinity
@@ -388,13 +458,28 @@ export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
 
 # === Discover Linode ID and Configuration ID ===
 # Linode API calls to find the instance ID and its configuration ID
-MAX_PAGES=50
 LINODE_ID=""
 TARGET_IP="$PUBLIC_IP"
 
-for page in $(seq 1 $MAX_PAGES); do
+# Step 1: Fetch page 1 and extract total pages from CLI output
+log "📄 Fetching page 1 to detect total number of pages..."
+PAGE_OUTPUT=$(linode-cli linodes list --page 1 --page-size 100)
+HEADER_LINE=$(echo "$PAGE_OUTPUT" | tail -n 1)
+TOTAL_PAGES=$(echo "$HEADER_LINE" | grep -oP 'Page 1 of \K[0-9]+')
+
+# Fallback in case parsing fails
+if [[ -z "$TOTAL_PAGES" ]]; then
+    TOTAL_PAGES=1
+    log "⚠️ Could not determine total pages. Defaulting to 1."
+fi
+
+log "📄 Total Pages Detected: $TOTAL_PAGES"
+
+# Step 2: Loop over the actual number of pages
+for page in $(seq 1 $TOTAL_PAGES); do
     log "🔍 Searching Linode list: Page $page"
-    wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
+    wait_for_dns
+
     result=$(linode-cli linodes list --page $page --page-size 100 --json)
     LINODE_ID=$(echo "$result" | jq -r --arg ip "$TARGET_IP" '.[] | select(.ipv4[]? == $ip) | .id')
 
@@ -404,10 +489,12 @@ for page in $(seq 1 $MAX_PAGES); do
     fi
 done
 
+# Final check
 if [[ -z "$LINODE_ID" ]]; then
-    log "❌ Failed to find Linode with public IP $TARGET_IP in $MAX_PAGES pages."
+    log "❌ Failed to find Linode with public IP $TARGET_IP in $TOTAL_PAGES pages."
     exit 1
 fi
+
 wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
 CONFIG_ID=$(linode-cli linodes configs-list $LINODE_ID --json | jq -r '.[0].id')
 
@@ -515,8 +602,8 @@ if is_vlan_attached; then
         '.items[] | select(.metadata.labels["k8s-app"] == "kube-dns") | .spec.nodeName' \
         | grep -w "$CURRENT_NODE")
     KUBE_EXIT=$?
-    set -e 
-   
+    set -e
+
     if [[ "$KUBE_EXIT" -ne 0 ]]; then
         log "⚠️ Failed to fetch CoreDNS pod status. Assuming no CoreDNS on this node. Proceeding with immediate reboot."
     fi
@@ -526,47 +613,55 @@ if is_vlan_attached; then
 
         ACQUIRED=false
         while [[ "$ACQUIRED" != true ]]; do
-            # Wait for DNS to resolve etcd
             until nslookup etcd-0.etcd.kube-system.svc.cluster.local >/dev/null 2>&1; do
                 log "🌐 Waiting for DNS to resolve etcd-0..."
                 sleep 5
             done
-            # Retry etcdctl get if it fails due to timeout or DNS
-            MAX_ETCD_RETRIES=10
-            ETCD_RETRY_DELAY=20
-            RETRY_COUNT=0
-            while true; do
-                set +e
-                PREV=$(etcdctl --endpoints "$ETCD_ENDPOINTS" get "$REBOOT_LOCK_KEY" --print-value-only 2>/tmp/etcd_err.log)
-                EXIT_CODE=$?
-                set -e
-            
-                if [[ "$EXIT_CODE" -eq 0 ]]; then
-                    break
-                else
-                    log "⚠️ etcdctl get failed (retry $((RETRY_COUNT+1))/$MAX_ETCD_RETRIES): $(cat /tmp/etcd_err.log)"
-                    RETRY_COUNT=$((RETRY_COUNT + 1))
-                    if [[ $RETRY_COUNT -ge $MAX_ETCD_RETRIES ]]; then
-                        log "❌ etcdctl failed after $MAX_ETCD_RETRIES attempts. Sleeping indefinitely..."
-                        sleep infinity
-                    fi
-                    sleep "$ETCD_RETRY_DELAY"
-                fi
-            done
-            if [[ -z "$PREV" ]]; then
-                set +e
-                etcdctl --endpoints "$ETCD_ENDPOINTS" put "$REBOOT_LOCK_KEY" "$CURRENT_NODE" --prev-kv
-                ETCD_PUT_LOCK_STATUS=$?
-                set -e
-                if [[ "$ETCD_PUT_LOCK_STATUS" -eq 0 ]]; then
-                    log "🔒 Lock acquired by $CURRENT_NODE for CoreDNS reboot."
-                    ACQUIRED=true
-                else
-                   log "⛔ I tried to put the value. Lock held by another node. Waiting for release..."
-                   sleep 10
-                fi
+
+            log "🔒 Attempting atomic lock via etcd transaction..."
+
+            BASE64_KEY=$(echo -n "$REBOOT_LOCK_KEY" | base64)
+            BASE64_NODE=$(echo -n "$CURRENT_NODE" | base64)
+
+            TXN_PAYLOAD=$(cat <<EOF
+{
+  "compare": [
+    {
+      "key": "$BASE64_KEY",
+      "target": "VERSION",
+      "result": "EQUAL",
+      "version": "0"
+    }
+  ],
+  "success": [
+    {
+      "requestPut": {
+        "key": "$BASE64_KEY",
+        "value": "$BASE64_NODE"
+      }
+    }
+  ],
+  "failure": [
+    {
+      "requestRange": {
+        "key": "$BASE64_KEY"
+      }
+    }
+  ]
+}
+EOF
+)
+
+            RESPONSE=$(curl -s -X POST "http://etcd-0.etcd.kube-system.svc.cluster.local:2379/v3/kv/txn" \
+              -H "Content-Type: application/json" \
+              -d "$TXN_PAYLOAD")
+
+            if echo "$RESPONSE" | grep -q '"succeeded":true'; then
+                log "✅ Lock acquired by $CURRENT_NODE for CoreDNS reboot."
+                ACQUIRED=true
             else
-                log "⛔ Lock held by $PREV. Waiting for release..."
+                HOLDER=$(echo "$RESPONSE" | jq -r '.responses[0].response_range.kvs[0].value' | base64 -d)
+                log "⛔ Lock held by $HOLDER. Waiting 10s before retry..."
                 sleep 10
             fi
         done
@@ -600,7 +695,6 @@ if is_vlan_attached; then
         fi
     done
 
-    # Safety net if reboot doesn't happen
     sleep 300
     log "⚠️ Node did not reboot as expected. Sleeping to avoid loop."
     sleep infinity

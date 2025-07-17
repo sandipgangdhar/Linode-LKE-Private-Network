@@ -183,72 +183,76 @@ def fetch_linode_token(config_file='/root/.linode-cli/linode-cli'):
 
 def fetch_assigned_ips():
     if (
-            VLAN_IP_CACHE["ips"] is not None
-            and VLAN_IP_CACHE["timestamp"] is not None
-            and (datetime.now() - VLAN_IP_CACHE["timestamp"]).total_seconds() < VLAN_IP_CACHE["ttl_seconds"]
+        VLAN_IP_CACHE["ips"] is not None
+        and VLAN_IP_CACHE["timestamp"] is not None
+        and (datetime.now() - VLAN_IP_CACHE["timestamp"]).total_seconds() < VLAN_IP_CACHE["ttl_seconds"]
     ):
         log("[INFO] Using cached VLAN IPs")
         return VLAN_IP_CACHE["ips"]
 
     LINODE_TOKEN = fetch_linode_token()
     REGION = os.getenv("REGION")
-
     if not REGION:
         log("[ERROR] REGION environment variable not set")
         raise EnvironmentError("REGION environment variable not set")
-
     if not LINODE_TOKEN:
         log("[ERROR] Missing Linode Token")
         return None
 
     headers = {"Authorization": f"Bearer {LINODE_TOKEN}"}
-    log(f"[DEBUG] Fetching VLAN IPs for region: {REGION}")
-
-    url = "https://api.linode.com/v4/linode/instances"
-    instances = api_request_with_retry(url, headers={"Authorization": f"Bearer {LINODE_TOKEN}",
-                                                     "X-Filter": f'{{"region": "{REGION}"}}'})
-
-    if not instances:
-        log("[ERROR] Failed to fetch Linode instances")
-        return None
-
-    linode_ids = [str(l["id"]) for l in instances.get("data", [])]
-    log(f"[DEBUG] Linode IDs fetched: {linode_ids}")
+    log(f"[DEBUG] Fetching Linode instances in region: {REGION}")
 
     vlan_ips = []
+    page = 1
+    total_pages = 1  # will be updated after first call
 
-    def fetch_configs(linode_id):
-        try:
-            log(f"[DEBUG] Fetching VLAN IPs for Linode ID: {linode_id}")
-            config_url = f"https://api.linode.com/v4/linode/instances/{linode_id}/configs"
-            configs = api_request_with_retry(config_url, headers)
-            if not configs:
-                log(f"[ERROR] Failed to fetch configurations for Linode ID {linode_id}")
-                return []
-            linode_vlan_ips = []
-            for config in configs.get("data", []):
-                for iface in config.get("interfaces", []):
-                    if iface.get("purpose") == "vlan":
-                        ip_address = iface.get("ipam_address")
-                        if ip_address:
-                            linode_vlan_ips.append(ip_address)
-                            log(f"[DEBUG] Found VLAN IP: {ip_address}")
-            return linode_vlan_ips
-        except Exception as e:
-            log(f"[ERROR] Exception in fetch_configs for Linode ID {linode_id}: {str(e)}")
-            return []
+    while page <= total_pages:
+        url = f"https://api.linode.com/v4/linode/instances?page={page}&page_size=100"
+        response = api_request_with_retry(url, headers={**headers, "X-Filter": f'{{"region": "{REGION}"}}'})
 
-    max_workers = int(os.getenv("MAX_WORKERS", 20))
-    max_workers = min(max_workers, max(1, len(linode_ids)))
-    if max_workers == 1 and len(linode_ids) > 1:
-        log(f"[WARN] Only 1 worker thread available with {len(linode_ids)} Linode instances. Possible API rate limiting.")
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = executor.map(fetch_configs, linode_ids)
-        for result in results:
-            vlan_ips.extend(result)
+        if not response or "data" not in response:
+            log(f"[ERROR] Failed to fetch instances on page {page}")
+            break
 
-    log(f"[DEBUG] All VLAN IPs in region {REGION}: {vlan_ips}")
+        if page == 1:
+            total_pages = response.get("pages", 1)
+            log(f"[DEBUG] Total pages of instances: {total_pages}")
 
+        linodes = response["data"]
+        for linode in linodes:
+            linode_id = linode.get("id")
+            if not linode_id:
+                continue
+
+            # Step 1: Get config list
+            config_list_url = f"https://api.linode.com/v4/linode/instances/{linode_id}/configs"
+            configs = api_request_with_retry(config_list_url, headers=headers)
+            if not configs or "data" not in configs:
+                continue
+
+            for config in configs["data"]:
+                config_id = config.get("id")
+                if not config_id:
+                    continue
+
+                # Step 2: Get config view
+                config_view_url = f"https://api.linode.com/v4/linode/instances/{linode_id}/configs/{config_id}"
+                config_view = api_request_with_retry(config_view_url, headers=headers)
+                if not config_view or "interfaces" not in config_view:
+                    continue
+
+                # Step 3: Extract VLAN IPs
+                for iface in config_view["interfaces"]:
+                    if iface.get("type") == "vlan":
+                        ipam_address = iface.get("ipam_address")
+                        if ipam_address:
+                            ip = ipam_address.split("/")[0]
+                            vlan_ips.append(ip)
+                            log(f"[DEBUG] Found VLAN IP: {ip}")
+
+        page += 1
+
+    log(f"[INFO] Total VLAN IPs fetched: {len(vlan_ips)}")
     VLAN_IP_CACHE["ips"] = vlan_ips
     VLAN_IP_CACHE["timestamp"] = datetime.now()
 

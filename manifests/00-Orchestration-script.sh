@@ -153,7 +153,7 @@ for i in {1..10}; do
         break
     fi
     echo "🔄 etcd pods not found yet. Retrying in 5 seconds... ($i/10)"
-    sleep 5
+    sleep 10
 done
 
 echo "⏳ Waiting for all etcd pods to become Ready..."
@@ -168,7 +168,7 @@ for i in {1..24}; do
     fi
 
     echo "🔄 etcd pods not ready yet. Retrying in 5 seconds... ($i/24)"
-    sleep 5
+    sleep 10
 done
 
 # === Step 5: Apply Initializer Job ===
