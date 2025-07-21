@@ -471,68 +471,52 @@ data:
         export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
         
         # === Discover Linode ID and Configuration ID ===
-        # Linode API calls to find the instance ID and its configuration ID
-
-        # Linode API calls to find the instance ID and its configuration ID
+        log "🌐 Finding Linode ID for Public IP: $PUBLIC_IP"
         LINODE_ID=""
         TARGET_IP="$PUBLIC_IP"
-        
-        # Step 1: Fetch page 1 and extract total pages from CLI output
-        log "📄 Fetching page 1 to detect total number of pages..."
-        PAGE_OUTPUT=$(linode-cli linodes list --page 1 --page-size 100)
-        HEADER_LINE=$(echo "$PAGE_OUTPUT" | tail -n 1)
-        TOTAL_PAGES=$(echo "$HEADER_LINE" | grep -oP 'Page 1 of \K[0-9]+')
-        
-        # Fallback in case parsing fails
-        if [[ -z "$TOTAL_PAGES" ]]; then
-            TOTAL_PAGES=1
-            log "⚠️ Could not determine total pages. Defaulting to 1."
-        fi
-        
-        log "📄 Total Pages Detected: $TOTAL_PAGES"
-        
-        # Step 2: Loop over the actual number of pages
-        for page in $(seq 1 $TOTAL_PAGES); do
+
+        # === Discover Linode ID and Configuration ID ===
+        # Linode API calls to find the instance ID and its configuration ID
+        # Loop through pages dynamically until result is found or all pages exhausted
+        page=1
+        while true; do
             log "🔍 Searching Linode list: Page $page"
             wait_for_dns
         
             result=$(linode-cli linodes list --page $page --page-size 100 --json)
+        
+            # Exit loop if this page has no results
+            if [[ $(echo "$result" | jq 'length') -eq 0 ]]; then
+                break
+            fi
+        
+            # Try to find the Linode ID matching the IP
             LINODE_ID=$(echo "$result" | jq -r --arg ip "$TARGET_IP" '.[] | select(.ipv4[]? == $ip) | .id')
         
             if [[ -n "$LINODE_ID" ]]; then
                 log "✅ Found Linode with IP $TARGET_IP. LINODE_ID: $LINODE_ID"
                 break
             fi
+        
+            page=$((page + 1))
         done
         
         # Final check
         if [[ -z "$LINODE_ID" ]]; then
-            log "❌ Failed to find Linode with public IP $TARGET_IP in $TOTAL_PAGES pages."
-            exit 1
-        fi
-
-        wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
-        CONFIG_ID=$(linode-cli linodes configs-list $LINODE_ID --json | jq -r '.[0].id')
-        
-        # Checking If the Linode ID or Config ID is found Correctly, retry after 60 seconds
-        MATCH_COUNT=$(echo "$LINODE_ID" | wc -w)
-        if [[ "$MATCH_COUNT" -ne 1 ]]; then
-            log "❌ Ambiguous or no Linode match found for IP $PUBLIC_IP (Count: $MATCH_COUNT). Aborting."
-            sleep 60
-            /tmp/02-script-vlan-attach.sh
+            log "❌ Failed to find Linode with public IP $TARGET_IP."
             exit 1
         fi
         
-        # If either the Linode ID or Config ID is not found, retry after 60 seconds
-        if [ -z "$LINODE_ID" ] || [ -z "$CONFIG_ID" ]; then
-            log "❌ Failed to retrieve Linode ID or Config ID. Sleeping for 60 seconds and retrying..."
-            sleep 60
-            /tmp/02-script-vlan-attach.sh
-            exit 0
+        # Now fetch CONFIG_ID
+        wait_for_dns
+        CONFIG_ID=$(linode-cli linodes configs-list "$LINODE_ID" --json | jq -r '.[0].id')
+        
+        if [ -z "$CONFIG_ID" ]; then
+            log "❌ Failed to retrieve configuration ID for Linode ID $LINODE_ID"
+            exit 1
         fi
         
         log "✅ Linode ID: $LINODE_ID, Config ID: $CONFIG_ID"
-        
         # === Main Logic ===
         handle_vlan_configured_but_missing_interface
         log "🔎 Checking if VLAN is already attached to Linode instance $LINODE_ID..."
