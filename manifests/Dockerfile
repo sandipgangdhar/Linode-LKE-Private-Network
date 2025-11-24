@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
     rm -rf /var/lib/apt/lists/*
 
 RUN pip install --upgrade pip && \
-    pip install linode-cli flask flask-cors etcd3 requests filelock aiohttp psutil 'protobuf<4.0.0,>=3.20.0'
+    pip install linode-cli flask flask-cors etcd3 requests filelock aiohttp psutil kubernetes pyyaml 'protobuf<4.0.0,>=3.20.0' 
 
 RUN curl -L https://github.com/etcd-io/etcd/releases/download/v3.5.12/etcd-v3.5.12-linux-amd64.tar.gz -o etcd.tar.gz && \
     tar xzf etcd.tar.gz --strip-components=1 -C /usr/local/bin etcd-v3.5.12-linux-amd64/etcdctl && \

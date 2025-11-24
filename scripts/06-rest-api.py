@@ -17,6 +17,10 @@ import signal
 import configparser
 import etcd3
 import random
+import os, uuid, yaml
+from flask import jsonify, request
+import etcd3
+from kubernetes import client, config
 
 # Initialize Flask application instance
 app = Flask(__name__)
@@ -304,6 +308,26 @@ def get_etcd_connection():
 
     raise ConnectionError("Unable to connect to any etcd endpoint")
 
+def get_etcd():
+    endpoints = os.getenv("ETCD_ENDPOINTS", "http://etcd-0.etcd.default.svc.cluster.local:2379").split(",")
+    for ep in endpoints:
+        ep = ep.strip().replace("http://","").replace("https://","")
+        if ":" in ep:
+            host, port = ep.split(":")
+        else:
+            host, port = ep, "2379"
+        try:
+            return etcd3.client(host=host, port=int(port))
+        except Exception:
+            continue
+    raise RuntimeError("No healthy etcd endpoints")
+
+def k8s_api():
+    try:
+        config.load_incluster_config()
+    except Exception:
+        config.load_kube_config()
+    return client.BatchV1Api(), client.CoreV1Api()
 
 # =======================
 # 🟢 Allocate IP Endpoint Sandip
@@ -547,6 +571,89 @@ def health_check():
     except Exception as e:
         log(f"[ERROR] Health check: Unexpected error: {str(e)}")
         return jsonify({"status": "unhealthy", "error": f"Unexpected error: {str(e)}"}), 500
+
+# =======================
+# 🟢 List the VLAN IP's from ETCD DB Sandip
+# =======================
+@app.get("/api/v1/vlan-ips")
+def list_ips():
+    prefix = os.getenv("ETCD_PREFIX", "/vlan/ip/")
+    ips = []
+    etcd = get_etcd()
+    for value, meta in etcd.get_prefix(prefix):
+        key = meta.key.decode()
+        ip = key.split(prefix, 1)[1]
+        if ip:
+            ips.append(ip)
+    # natural-ish sort
+    ips.sort(key=lambda s: [int(t) if t.isdigit() else t for t in s.replace('/', '.').split('.')])
+    return jsonify({"ips": ips})
+
+# =======================
+# 🟢 Refresh the VLAN IP's Sandip
+# =======================
+@app.post("/api/v1/refresh")
+def refresh():
+    ns = os.getenv("NAMESPACE", "kube-system")
+    manifest_path = "/manifests/05-vlan-ip-initializer-job.yaml"
+    with open(manifest_path, "r") as f:
+        job_def = yaml.safe_load(f)
+
+    base_name = job_def["metadata"]["name"]
+    run_name = f"{base_name}-{uuid.uuid4().hex[:6]}"
+    job_def["metadata"]["name"] = run_name
+    job_def["metadata"]["namespace"] = ns
+
+    batch, _ = k8s_api()
+    batch.create_namespaced_job(namespace=ns, body=job_def)
+    return jsonify({"jobName": run_name})
+
+# =======================
+# 🟢 fetch the refresh job details Sandip
+# =======================
+@app.get("/api/v1/refresh/<job_name>/detail")
+def refresh_detail(job_name):
+    ns = os.getenv("NAMESPACE", "kube-system")
+    batch, core = k8s_api()
+    job = batch.read_namespaced_job_status(job_name, ns)
+
+    status = "Running"
+    started_at = job.status.start_time.isoformat() if job.status.start_time else None
+    completed_at = None
+
+    if job.status.completion_time:
+        completed_at = job.status.completion_time.isoformat()
+        status = "Succeeded"
+
+    for c in (job.status.conditions or []):
+        if c.type == "Failed" and c.status == "True":
+            status = "Failed"
+            if not completed_at and c.last_transition_time:
+                completed_at = c.last_transition_time.isoformat()
+
+    # Find job pod & logs
+    selector = ""
+    if job.spec and job.spec.selector and job.spec.selector.match_labels:
+        labels = [f"{k}={v}" for k, v in job.spec.selector.match_labels.items()]
+        selector = ",".join(labels)
+
+    pod_name, logs = None, ""
+    pods = core.list_namespaced_pod(ns, label_selector=selector) if selector else core.list_namespaced_pod(ns)
+    for p in pods.items:
+        pod_name = p.metadata.name
+        try:
+            logs = core.read_namespaced_pod_log(name=pod_name, namespace=ns, tail_lines=500)
+        except Exception:
+            pass
+        break
+
+    return jsonify({
+        "status": status,
+        "startedAt": started_at,
+        "completedAt": completed_at,
+        "podName": pod_name,
+        "logs": logs,
+    })
 
 # =======================
 # 🚀 Start Flask Application

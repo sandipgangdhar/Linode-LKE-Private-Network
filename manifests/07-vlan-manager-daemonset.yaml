@@ -87,6 +87,12 @@ spec:
               export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli" && \
               echo "✅ Linode CLI configuration completed."
 
+              # === Install iptables inside the container (Debian 12) ===
+              echo "📦 Installing iptables package inside vlan-manager container..."
+              apt-get update -y >/dev/null 2>&1 || apt-get update -y
+              apt-get install -y iptables >/dev/null 2>&1 || apt-get install -y iptables
+              echo "✅ iptables installation complete (if available)."
+
               # === Copy Scripts ===
               cp --dereference /root/scripts/02-script-vlan-attach.sh /tmp/02-script-vlan-attach.sh && \
               chmod u+x /tmp/02-script-vlan-attach.sh && \
@@ -136,41 +142,82 @@ spec:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: ROUTE_LIST
+
             - name: SUBNET
               valueFrom:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: SUBNET
+
             - name: VLAN_LABEL
               valueFrom:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: VLAN_LABEL
+
             - name: KUBECONFIG
               valueFrom:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: KUBECONFIG
+
             - name: LINODE_CLI_CONFIG
               valueFrom:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: LINODE_CLI_CONFIG
+
             - name: ENABLE_PUSH_ROUTE
               valueFrom:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: ENABLE_PUSH_ROUTE
+
             - name: ENABLE_FIREWALL
               valueFrom:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: ENABLE_FIREWALL
+
             - name: LKE_CLUSTER_ID
               valueFrom:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: LKE_CLUSTER_ID
+
+            # === NEW: VPC interface config ===
+            - name: ENABLE_VPC_INTERFACE
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: ENABLE_VPC_INTERFACE
+
+            - name: VPC_SUBNET_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: VPC_SUBNET_ID
+
+            - name: VPC_INTERFACE_INDEX
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: VPC_INTERFACE_INDEX
+
+            # === NEW: VLAN east–west firewall ===
+            - name: ENABLE_VLAN_EW_FIREWALL
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: ENABLE_VLAN_EW_FIREWALL
+
+            - name: VLAN_INTERFACE_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: VLAN_INTERFACE_NAME
+
+            # ETCD endpoints (you can keep this as-is or hardcode)
             - name: ETCD_ENDPOINTS
               value: "${ETCD_ENDPOINTS}"
           # Volume mounts for scripts

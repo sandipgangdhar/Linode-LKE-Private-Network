@@ -1,39 +1,4 @@
 #!/bin/bash
-# 02-script-vlan-attach.sh
-#
-# This shell script handles the attachment of a VLAN interface to a Linode instance
-# running in a Kubernetes environment. It configures IP addresses, VLAN labels,
-# and routing information to enable communication across the VLAN.
-#
-# -----------------------------------------------------
-# 📝 Parameters:
-#
-# 1️⃣ SUBNET              - The subnet for VLAN IP assignments.
-# 2️⃣ ROUTE_IP            - Gateway IP for the primary subnet.
-# 3️⃣ VLAN_LABEL          - VLAN identifier for Linode.
-# 4️⃣ DEST_SUBNET         - Destination subnet for static routing.
-#
-# -----------------------------------------------------
-# 🔄 Usage:
-#
-# - This script is executed as part of the DaemonSet startup.
-# - It checks if the VLAN is attached to the instance and configures routing.
-# - If the VLAN is not attached, it handles the attachment using Linode CLI.
-#
-# -----------------------------------------------------
-# 📌 Best Practices:
-#
-# - Ensure proper RBAC permissions for `linode-cli` to execute API commands.
-# - Monitor the logs for successful attachment and routing configuration.
-# - Handle edge cases where VLAN or subnet configurations might fail.
-#
-# -----------------------------------------------------
-# 🖋️ Author:
-# - Sandip Gangdhar
-# - GitHub: https://github.com/sandipgangdhar
-#
-# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
-# === Exit on error ===
 set -e
 
 # === Environment Variables ===
@@ -42,17 +7,25 @@ SUBNET="${SUBNET}"
 export ROUTE_LIST="${ROUTE_LIST:-}"
 VLAN_LABEL="${VLAN_LABEL}"
 DEST_SUBNET="${DEST_SUBNET}"
-ENABLE_PUSH_ROUTE="$(echo "$ENABLE_PUSH_ROUTE" | tr '[:upper:]' '[:lower:]')"  # flag to control route pushing
-ENABLE_FIREWALL="$(echo "$ENABLE_FIREWALL" | tr '[:upper:]' '[:lower:]')" # flag to control FIREWALL Creation and attachment
+
+ENABLE_PUSH_ROUTE="$(echo "$ENABLE_PUSH_ROUTE" | tr '[:upper:]' '[:lower:]')"   # control route pushing
+ENABLE_FIREWALL="$(echo "$ENABLE_FIREWALL" | tr '[:upper:]' '[:lower:]')"       # control Linode Firewall
 LKE_CLUSTER_ID="${LKE_CLUSTER_ID}"
 
+# === New VPC + VLAN-EW firewall config ===
+ENABLE_VPC_INTERFACE="$(echo "${ENABLE_VPC_INTERFACE:-false}" | tr '[:upper:]' '[:lower:]')"
+VPC_SUBNET_ID="${VPC_SUBNET_ID:-}"                     # numeric Linode VPC subnet_id
+VPC_INTERFACE_INDEX="${VPC_INTERFACE_INDEX:-2}"        # interface index for eth2
+
+ENABLE_VLAN_EW_FIREWALL="$(echo "${ENABLE_VLAN_EW_FIREWALL:-false}" | tr '[:upper:]' '[:lower:]')"
+VLAN_INTERFACE_NAME="${VLAN_INTERFACE_NAME:-eth1}"     # override if needed, default eth1
+
 # === Function to Log Events ===
-# This function logs events with a timestamp
 log() {
     echo "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
 }
 
-log "🔄 Starting VLAN Attachment Script..."
+log "🔄 Starting VLAN + VPC Attachment Script..."
 
 # Wait for DNS to resolve
 function wait_for_dns() {
@@ -81,7 +54,7 @@ if [ -n "$ETCD_ENDPOINTS" ]; then
     fi
 fi
 
-# === Function to check if VLAN is already attached ===
+# === Function to check if VLAN is already attached (interfaces[1]) ===
 is_vlan_attached() {
     wait_for_dns ⏳ Ensure DNS is up before calling Linode API
     VLAN_STATUS=$(linode-cli linodes config-view "$LINODE_ID" "$CONFIG_ID" --json | jq -r '.[0].interfaces[1].purpose // empty')
@@ -92,7 +65,136 @@ is_vlan_attached() {
     fi
 }
 
-# Function: Detect Configured-But-Missing VLAN Interface and Trigger Reboot
+# === Function to check if VPC is already attached (interfaces[VPC_INTERFACE_INDEX]) ===
+is_vpc_attached() {
+    # Do NOT depend on ENABLE_VPC_INTERFACE here; just read actual config
+    wait_for_dns ⏳ Ensure DNS is up before calling Linode API
+
+    local idx="${VPC_INTERFACE_INDEX:-2}"
+    local PURPOSE
+
+    PURPOSE=$(linode-cli linodes config-view "$LINODE_ID" "$CONFIG_ID" --json \
+        | jq -r ".[0].interfaces[$idx].purpose // empty")
+
+    if [[ "$PURPOSE" == "vpc" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# === Serialized reboot logic (CoreDNS-aware) ===
+serialized_reboot() {
+    REBOOT_LOCK_KEY="/coredns-reboot-lock"
+    CURRENT_NODE=$(hostname)
+    export ETCDCTL_API=3
+
+    if [ -z "$ETCD_ENDPOINTS" ]; then
+        log "❌ ETCD_ENDPOINTS not set. Aborting reboot!"
+        sleep infinity
+    fi
+
+    log "🔍 Checking if this node is hosting a CoreDNS pod..."
+    set +e
+    COREDNS_HOST=$(kubectl get pods -n kube-system -o json | jq -r \
+        '.items[] | select(.metadata.labels["k8s-app"] == "kube-dns") | .spec.nodeName' \
+        | grep -w "$CURRENT_NODE")
+    KUBE_EXIT=$?
+    set -e
+
+    if [[ "$KUBE_EXIT" -ne 0 ]]; then
+        log "⚠️ Failed to fetch CoreDNS pod status. Assuming no CoreDNS on this node. Proceeding with immediate reboot."
+    fi
+
+    if [[ -n "$COREDNS_HOST" ]]; then
+        log "🧠 $CURRENT_NODE is hosting a CoreDNS pod. Serialized reboot enabled."
+
+        ACQUIRED=false
+        while [[ "$ACQUIRED" != true ]]; do
+            until nslookup etcd-0.etcd.kube-system.svc.cluster.local >/dev/null 2>&1; do
+                log "🌐 Waiting for DNS to resolve etcd-0..."
+                sleep 5
+            done
+
+            log "🔒 Attempting atomic lock via etcd transaction..."
+
+            BASE64_KEY=$(echo -n "$REBOOT_LOCK_KEY" | base64)
+            BASE64_NODE=$(echo -n "$CURRENT_NODE" | base64)
+
+            TXN_PAYLOAD=$(cat <<EOF
+{
+  "compare": [
+    {
+      "key": "$BASE64_KEY",
+      "target": "VERSION",
+      "result": "EQUAL",
+      "version": "0"
+    }
+  ],
+  "success": [
+    {
+      "requestPut": {
+        "key": "$BASE64_KEY",
+        "value": "$BASE64_NODE"
+      }
+    }
+  ],
+  "failure": [
+    {
+      "requestRange": {
+        "key": "$BASE64_KEY"
+      }
+    }
+  ]
+}
+EOF
+)
+
+            RESPONSE=$(curl -s -X POST "http://etcd-0.etcd.kube-system.svc.cluster.local:2379/v3/kv/txn" \
+              -H "Content-Type: application/json" \
+              -d "$TXN_PAYLOAD")
+
+            if echo "$RESPONSE" | grep -q '"succeeded":true'; then
+                log "✅ Lock acquired by $CURRENT_NODE for CoreDNS reboot."
+                ACQUIRED=true
+            else
+                HOLDER=$(echo "$RESPONSE" | jq -r '.responses[0].response_range.kvs[0].value' | base64 -d)
+                log "⛔ Lock held by $HOLDER. Waiting 10s before retry..."
+                sleep 10
+            fi
+        done
+    else
+        log "🚀 This node is NOT hosting a CoreDNS pod. Rebooting immediately..."
+    fi
+
+    # === Reboot logic ===
+    log "🔁 Initiating reboot via Linode CLI..."
+    RETRY=0
+    MAX_RETRIES=10
+
+    while true; do
+        set +e
+        wait_for_dns ⏳ Ensure DNS is up before calling Linode API
+        linode-cli linodes reboot "$LINODE_ID"
+        EXIT_CODE=$?
+        set -e
+
+        if [[ "$EXIT_CODE" -eq 0 ]]; then
+            log "✅ Reboot command succeeded."
+            break
+        else
+            log "⚠️ Reboot failed (possibly Linode busy). Retrying in 5s... ($((RETRY+1))/$MAX_RETRIES)"
+            RETRY=$((RETRY + 1))
+            if [[ $RETRY -ge $MAX_RETRIES ]]; then
+                log "❌ Reboot failed after $MAX_RETRIES attempts. Sleeping indefinitely."
+                sleep infinity
+            fi
+            sleep 5
+        fi
+    done
+}
+
+# === Function: Detect Configured-But-Missing VLAN Interface and Trigger Reboot ===
 function handle_vlan_configured_but_missing_interface() {
     set +e
     wait_for_dns
@@ -213,6 +315,101 @@ EOF
     fi
 }
 
+# === Helper: get VLAN interface name (eth1 or detected by IP) ===
+get_vlan_interface_name() {
+    if [[ -n "$VLAN_INTERFACE_NAME" ]]; then
+        echo "$VLAN_INTERFACE_NAME"
+        return 0
+    fi
+
+    wait_for_dns ⏳ Ensure DNS is up before calling Linode API
+    local VLAN_IP
+    VLAN_IP=$(linode-cli linodes config-view "$LINODE_ID" "$CONFIG_ID" --json \
+        | jq -r '.[0].interfaces[1].ipam_address // empty')
+
+    if [[ -z "$VLAN_IP" ]]; then
+        log "❌ Could not read VLAN ipam_address from config. Falling back to eth1."
+        echo "eth1"
+        return 0
+    fi
+
+    local VLAN_IP_ADDR
+    VLAN_IP_ADDR=$(echo "$VLAN_IP" | cut -d'/' -f1)
+
+    local IFACE
+    IFACE=$(ip -o addr | awk -v ip="$VLAN_IP_ADDR" '$0 ~ ip {print $2; exit}')
+
+    if [[ -z "$IFACE" ]]; then
+        log "⚠️ Could not detect interface for VLAN IP $VLAN_IP_ADDR. Falling back to eth1."
+        echo "eth1"
+    else
+        echo "$IFACE"
+    fi
+}
+
+# === VLAN east–west firewall rules (idempotent) ===
+configure_vlan_ew_firewall() {
+    if [[ "$ENABLE_VLAN_EW_FIREWALL" != "true" ]]; then
+        log "ℹ️ Skipping VLAN east–west firewall; ENABLE_VLAN_EW_FIREWALL != true."
+        return 0
+    fi
+
+    local VLAN_IF
+    VLAN_IF=$(get_vlan_interface_name)
+
+    log "🛡️ Enforcing VLAN east–west firewall on interface: $VLAN_IF"
+
+    # 1. Allow responses to node-initiated connections on VLAN
+    if iptables -C INPUT -i "$VLAN_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
+        log "✅ Rule already present: ACCEPT ESTABLISHED,RELATED on $VLAN_IF"
+    else
+        iptables -A INPUT -i "$VLAN_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        log "➕ Added rule: ACCEPT ESTABLISHED,RELATED on $VLAN_IF"
+    fi
+
+    # 2. Drop all NEW inbound on VLAN (no one should initiate to workers on VLAN)
+    if iptables -C INPUT -i "$VLAN_IF" -m conntrack --ctstate NEW -j DROP 2>/dev/null; then
+        log "✅ Rule already present: DROP NEW on $VLAN_IF"
+    else
+        iptables -A INPUT -i "$VLAN_IF" -m conntrack --ctstate NEW -j DROP
+        log "➕ Added rule: DROP NEW on $VLAN_IF"
+    fi
+}
+
+# === Attach only VPC interface when VLAN is already present ===
+attach_vpc_interface_only() {
+    if [[ "$ENABLE_VPC_INTERFACE" != "true" ]]; then
+        log "ℹ️ VPC interface management disabled. Skipping VPC attach."
+        return 0
+    fi
+
+    if [[ -z "$VPC_SUBNET_ID" ]]; then
+        log "❌ ENABLE_VPC_INTERFACE=true but VPC_SUBNET_ID is empty. Sleeping to avoid loops."
+        sleep infinity
+    fi
+
+    if is_vpc_attached; then
+        log "✅ VPC interface already attached. Skipping VPC config-update."
+        return 0
+    fi
+
+    log "🚀 Attaching VPC interface (subnet_id=$VPC_SUBNET_ID) at interfaces[$VPC_INTERFACE_INDEX]..."
+    wait_for_dns ⏳ Ensure DNS is up before calling Linode API
+
+    local CONFIG_JSON
+    CONFIG_JSON=$(linode-cli linodes config-view "$LINODE_ID" "$CONFIG_ID" --json | jq '.[0]')
+
+    local UPDATED_INTERFACES
+    UPDATED_INTERFACES=$(echo "$CONFIG_JSON" | jq --argjson subnet_id "$VPC_SUBNET_ID" '
+        .interfaces | .['"$VPC_INTERFACE_INDEX"'] = { "purpose": "vpc", "subnet_id": $subnet_id }
+    ')
+
+    wait_for_dns ⏳ Ensure DNS is up before calling Linode API
+    linode-cli linodes config-update "$LINODE_ID" "$CONFIG_ID" --interfaces "$UPDATED_INTERFACES"
+
+    log "✅ VPC interface successfully attached as eth${VPC_INTERFACE_INDEX}."
+}
+
 # === Function to push the route ===
 push_route() {
     if [[ "$ENABLE_PUSH_ROUTE" == "true" ]]; then
@@ -298,13 +495,13 @@ push_route() {
                     set -e
 
                     if [ $ADD_STATUS -eq 0 ]; then
-                        log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to eth1."
+                        log "✅ Route $DEST_SUBNET via $ROUTE_IP successfully added to $VLAN_INTERFACE."
                     else
                         log "⚠️  Failed to add route $DEST_SUBNET via $ROUTE_IP. It may already exist."
                     fi
                 fi
-            fi  
-        done   
+            fi
+        done
     else
         log "ℹ️ Skipping route push as ENABLE_PUSH_ROUTE is set to false."
     fi
@@ -434,22 +631,16 @@ create_and_attach_firewall() {
     fi
 }
 
-
 # === Discover Node IP and Name ===
-# Retrieve the IP address of eth0 (assumed to be the main interface)
 log "🌐 Fetching NODE IP of the instance..."
 NODE_IP=$(ip addr show eth0 | grep -v "eth0:[0-9]" | grep -w inet | awk {'print $2'}|awk -F'/' {'print $1'})
-
 log "🌐 Node IP: $NODE_IP"
 
-# Query Kubernetes to find the node name associated with this IP
 log "🌐 Fetching NODE NAME of the instance..."
 NODE_NAME=$(kubectl get nodes -o json | jq -r '.items[] | select(.status.addresses[]?.address == "'"$NODE_IP"'") | .metadata.name')
-
 log "🌐 Node Name: $NODE_NAME"
 
 # === Fetch Public IP of the Node ===
-# This fetches the public IP associated with the node from the Kubernetes API
 log "🌐 Fetching Public IP of the instance..."
 PUBLIC_IP=$(kubectl get node $NODE_NAME -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}' | awk {'print $1'})
 log "🌐 Public IP of the Node: $PUBLIC_IP"
@@ -461,7 +652,6 @@ log "🌐 Finding Linode ID for Public IP: $PUBLIC_IP"
 LINODE_ID=""
 TARGET_IP="$PUBLIC_IP"
 
-# Loop through pages dynamically until result is found or all pages exhausted
 page=1
 while true; do
     log "🔍 Searching Linode list: Page $page"
@@ -469,12 +659,10 @@ while true; do
 
     result=$(linode-cli linodes list --page $page --page-size 100 --json)
 
-    # Exit loop if this page has no results
     if [[ $(echo "$result" | jq 'length') -eq 0 ]]; then
         break
     fi
 
-    # Try to find the Linode ID matching the IP
     LINODE_ID=$(echo "$result" | jq -r --arg ip "$TARGET_IP" '.[] | select(.ipv4[]? == $ip) | .id')
 
     if [[ -n "$LINODE_ID" ]]; then
@@ -485,13 +673,11 @@ while true; do
     page=$((page + 1))
 done
 
-# Final check
 if [[ -z "$LINODE_ID" ]]; then
     log "❌ Failed to find Linode with public IP $TARGET_IP."
     exit 1
 fi
 
-# Now fetch CONFIG_ID
 wait_for_dns
 CONFIG_ID=$(linode-cli linodes configs-list "$LINODE_ID" --json | jq -r '.[0].id')
 
@@ -503,18 +689,49 @@ fi
 log "✅ Linode ID: $LINODE_ID, Config ID: $CONFIG_ID"
 
 # === Main Logic ===
+
+# 1) Fix "configured but missing VLAN interface" first (ensures interface exists on OS)
 handle_vlan_configured_but_missing_interface
-log "🔎 Checking if VLAN is already attached to Linode instance $LINODE_ID..."
+
+# 2) Check current interface state
+log "🔎 Checking existing VLAN/VPC attachment state for Linode instance $LINODE_ID..."
+VLAN_PRESENT=false
+VPC_PRESENT=false
+
 if is_vlan_attached; then
-    log "✅ VLAN is already attached. Skipping VLAN configuration and directly pushing the route."
-    push_route
-    create_and_attach_firewall
-    log "🛌 VLAN configuration complete. Sleeping indefinitely..."
+    VLAN_PRESENT=true
+fi
+if is_vpc_attached; then
+    VPC_PRESENT=true
+fi
+
+log "🔎 State summary: VLAN_PRESENT=${VLAN_PRESENT}, ENABLE_VPC_INTERFACE=${ENABLE_VPC_INTERFACE}, VPC_PRESENT=${VPC_PRESENT}"
+
+# 2a) If VLAN is attached and VPC is either disabled or already attached => just do routes/firewall and iptables, no reboot
+if [[ "$VLAN_PRESENT" == true && "$ENABLE_VPC_INTERFACE" == "true" && "$VPC_PRESENT" == false ]]; then
+    log "ℹ️ VLAN is attached but VPC interface is missing. Attaching VPC and rebooting once..."
+    attach_vpc_interface_only
+    serialized_reboot
+    sleep 300
+    log "⚠️ Node did not reboot as expected after VPC attach. Sleeping to avoid loop."
     sleep infinity
 fi
 
-# === VLAN Configuration Logic with Retry ===
-log "❌ VLAN is not attached. Proceeding with VLAN configuration..."
+# 2b) VLAN attached and either:
+#     - VPC is disabled (ENABLE_VPC_INTERFACE != true), OR
+#     - VPC is already present
+#     => No config-update, no reboot; just routes/firewall/iptables.
+if [[ "$VLAN_PRESENT" == true ]]; then
+    log "✅ VLAN is attached and VPC state is satisfied (either disabled or already present). Skipping config-update and reboot."
+    push_route
+    create_and_attach_firewall
+    configure_vlan_ew_firewall
+    log "🛌 VLAN/VPC configuration and firewall complete. Sleeping indefinitely..."
+    sleep infinity
+fi
+
+# 3) VLAN is not attached => allocate VLAN IP and build interfaces list (VLAN + optional VPC), then reboot ONCE
+log "❌ VLAN is not attached. Proceeding with VLAN (and optional VPC) configuration..."
 MAX_RETRIES=5
 RETRY_COUNT=0
 SUCCESS=false
@@ -551,134 +768,43 @@ if [ "$SUCCESS" = false ]; then
     exit 0
 fi
 
-# === Build VLAN JSON ===
-log "⚙️  Building VLAN attachment JSON..."
-INTERFACES_JSON=$(jq -n --arg ip "$IP_ADDRESS" --arg vlan "$VLAN_LABEL" '
-    [
-      { "type": "public", "purpose": "public" },
-      { "type": "vlan", "label": $vlan, "purpose": "vlan", "ipam_address": $ip }
-    ]
-')
-echo $INTERFACES_JSON | jq .
+# === Build VLAN (+optional VPC) JSON ===
+log "⚙️  Building VLAN (and optionally VPC) attachment JSON..."
 
-# === Attach the VLAN interface ===
-log "⚙️  Attaching VLAN interface to Linode instance..."
+if [[ "$ENABLE_VPC_INTERFACE" == "true" && -n "$VPC_SUBNET_ID" ]]; then
+    INTERFACES_JSON=$(jq -n --arg ip "$IP_ADDRESS" --arg vlan "$VLAN_LABEL" --argjson subnet_id "$VPC_SUBNET_ID" '
+        [
+          { "type": "public", "purpose": "public" },
+          { "type": "vlan", "label": $vlan, "purpose": "vlan", "ipam_address": $ip },
+          { "purpose": "vpc", "subnet_id": $subnet_id }
+        ]
+    ')
+    log "📦 Configuring interfaces: public (eth0), VLAN (eth1), VPC (eth2)"
+else
+    INTERFACES_JSON=$(jq -n --arg ip "$IP_ADDRESS" --arg vlan "$VLAN_LABEL" '
+        [
+          { "type": "public", "purpose": "public" },
+          { "type": "vlan", "label": $vlan, "purpose": "vlan", "ipam_address": $ip }
+        ]
+    ')
+    log "📦 Configuring interfaces: public (eth0), VLAN (eth1)"
+fi
+
+echo "$INTERFACES_JSON" | jq .
+
+# === Attach the VLAN (and optional VPC) interface(s) ===
+log "⚙️  Attaching VLAN (and optional VPC) interface(s) to Linode instance..."
 wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
 linode-cli linodes config-update "$LINODE_ID" "$CONFIG_ID" --interfaces "$INTERFACES_JSON" --label "Boot Config"
 
-# === Check VLAN is attached after attachment and firewall ===
+# === Check VLAN is attached after attachment and then reboot ONCE ===
 if is_vlan_attached; then
     log "✅ VLAN is successfully attached now. Proceeding to reboot for changes to take effect..."
 
+    # Mark that this run is performing a reboot so we don't release IP on EXIT
     touch /tmp/rebooting
 
-    REBOOT_LOCK_KEY="/coredns-reboot-lock"
-    CURRENT_NODE=$(hostname)
-    export ETCDCTL_API=3
-
-    if [ -z "$ETCD_ENDPOINTS" ]; then
-        log "❌ ETCD_ENDPOINTS not set. Aborting reboot!"
-        sleep infinity
-    fi
-
-    log "🔍 Checking if this node is hosting a CoreDNS pod..."
-    set +e
-    COREDNS_HOST=$(kubectl get pods -n kube-system -o json | jq -r \
-        '.items[] | select(.metadata.labels["k8s-app"] == "kube-dns") | .spec.nodeName' \
-        | grep -w "$CURRENT_NODE")
-    KUBE_EXIT=$?
-    set -e
-
-    if [[ "$KUBE_EXIT" -ne 0 ]]; then
-        log "⚠️ Failed to fetch CoreDNS pod status. Assuming no CoreDNS on this node. Proceeding with immediate reboot."
-    fi
-
-    if [[ -n "$COREDNS_HOST" ]]; then
-        log "🧠 $CURRENT_NODE is hosting a CoreDNS pod. Serialized reboot enabled."
-
-        ACQUIRED=false
-        while [[ "$ACQUIRED" != true ]]; do
-            until nslookup etcd-0.etcd.kube-system.svc.cluster.local >/dev/null 2>&1; do
-                log "🌐 Waiting for DNS to resolve etcd-0..."
-                sleep 5
-            done
-
-            log "🔒 Attempting atomic lock via etcd transaction..."
-
-            BASE64_KEY=$(echo -n "$REBOOT_LOCK_KEY" | base64)
-            BASE64_NODE=$(echo -n "$CURRENT_NODE" | base64)
-
-            TXN_PAYLOAD=$(cat <<EOF
-{
-  "compare": [
-    {
-      "key": "$BASE64_KEY",
-      "target": "VERSION",
-      "result": "EQUAL",
-      "version": "0"
-    }
-  ],
-  "success": [
-    {
-      "requestPut": {
-        "key": "$BASE64_KEY",
-        "value": "$BASE64_NODE"
-      }
-    }
-  ],
-  "failure": [
-    {
-      "requestRange": {
-        "key": "$BASE64_KEY"
-      }
-    }
-  ]
-}
-EOF
-)
-
-            RESPONSE=$(curl -s -X POST "http://etcd-0.etcd.kube-system.svc.cluster.local:2379/v3/kv/txn" \
-              -H "Content-Type: application/json" \
-              -d "$TXN_PAYLOAD")
-
-            if echo "$RESPONSE" | grep -q '"succeeded":true'; then
-                log "✅ Lock acquired by $CURRENT_NODE for CoreDNS reboot."
-                ACQUIRED=true
-            else
-                HOLDER=$(echo "$RESPONSE" | jq -r '.responses[0].response_range.kvs[0].value' | base64 -d)
-                log "⛔ Lock held by $HOLDER. Waiting 10s before retry..."
-                sleep 10
-            fi
-        done
-    else
-        log "🚀 This node is NOT hosting a CoreDNS pod. Rebooting immediately..."
-    fi
-
-    # === Reboot logic ===
-    log "🔁 Initiating reboot via Linode CLI..."
-    RETRY=0
-    MAX_RETRIES=10
-
-    while true; do
-        set +e
-        wait_for_dns # ⏳ Ensure DNS is up before calling Linode API
-        linode-cli linodes reboot "$LINODE_ID"
-        EXIT_CODE=$?
-        set -e
-
-        if [[ "$EXIT_CODE" -eq 0 ]]; then
-            log "✅ Reboot command succeeded."
-            break
-        else
-            log "⚠️ Reboot failed (possibly Linode busy). Retrying in 5s... ($((RETRY+1))/$MAX_RETRIES)"
-            RETRY=$((RETRY + 1))
-            if [[ $RETRY -ge $MAX_RETRIES ]]; then
-                log "❌ Reboot failed after $MAX_RETRIES attempts. Sleeping indefinitely."
-                sleep infinity
-            fi
-            sleep 5
-        fi
-    done
+    serialized_reboot
 
     sleep 300
     log "⚠️ Node did not reboot as expected. Sleeping to avoid loop."
@@ -690,12 +816,12 @@ else
     exit 1
 fi
 
-# === Cleanup Logic ===
+# === Cleanup Logic (currently not reached in normal flow, but kept for safety) ===
 cleanup() {
     if [ -f "/tmp/rebooting" ]; then
         log "Skipping IP release due to planned reboot."
         rm -rfv /tmp/rebooting
-    else
+    elif [ -n "$IP_ADDRESS" ]; then
         log "Releasing IP address $IP_ADDRESS..."
         /tmp/04-script-ip-release.sh "$IP_ADDRESS"
         log "IP address $IP_ADDRESS released."
@@ -705,6 +831,6 @@ trap cleanup EXIT
 
 log "✅ VLAN Attachment completed successfully."
 log "🌐 Instance $LINODE_ID is now connected to VLAN $VLAN_LABEL with IP $IP_ADDRESS."
-log "🟢 VLAN and Firewall configuration steps completed successfully."
+log "🟢 VLAN, VPC (if enabled), Routes, Firewall, and VLAN-EW iptables configuration steps completed successfully."
 log "🛌 Script execution complete. Sleeping indefinitely..."
 sleep infinity
