@@ -8,6 +8,9 @@ set -e
 # === Cleanup Function on Failure ===
 cleanup() {
     echo "❌ Deployment failed. Performing cleanup..."
+
+    echo "🧹 Cleaning up Kyverno policy (VLAN-ready gate)..."
+    kubectl delete clusterpolicy enforce-vlan-ready-nodes --ignore-not-found && echo "✅ Kyverno policy deleted."
     
     echo "🧹 Cleaning up Initializer Job..."
     kubectl delete job vlan-ip-initializer -n kube-system --ignore-not-found && echo "✅ Initializer Job deleted."
@@ -45,6 +48,118 @@ trap cleanup EXIT
 # === Function to log messages ===
 log() {
     echo -e "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
+}
+
+# === Kyverno install + wait helpers ===
+
+KYVERNO_INSTALL_URL="${KYVERNO_INSTALL_URL:-https://github.com/kyverno/kyverno/releases/latest/download/install.yaml}"
+KYVERNO_NAMESPACE="${KYVERNO_NAMESPACE:-kyverno}"
+KYVERNO_POLICY_FILE="${KYVERNO_POLICY_FILE:-09-kyverno-vlan-ready-policy.yaml}"
+
+install_kyverno() {
+    log "🔧 Checking Kyverno installation..."
+
+    # If CRD exists, Kyverno is already installed (or at least CRDs are present)
+    if kubectl get crd clusterpolicies.kyverno.io &>/dev/null; then
+        log "✅ Kyverno CRDs already present. Skipping Kyverno installation."
+        return 0
+    fi
+
+    log "🚀 Installing Kyverno from: $KYVERNO_INSTALL_URL"
+    kubectl create -f "$KYVERNO_INSTALL_URL"
+
+    log "⏳ Waiting for Kyverno namespace to exist..."
+    for i in {1..30}; do
+        if kubectl get ns "$KYVERNO_NAMESPACE" &>/dev/null; then
+            log "✅ Kyverno namespace found: $KYVERNO_NAMESPACE"
+            break
+        fi
+        sleep 2
+    done
+
+    log "⏳ Waiting for Kyverno pods to be Ready..."
+    # Wait for deployments if present (Kyverno install creates deployments)
+    # Use a soft approach to avoid failing if deployment names change slightly across versions.
+    kubectl -n "$KYVERNO_NAMESPACE" rollout status deploy/kyverno --timeout=300s 2>/dev/null || true
+    kubectl -n "$KYVERNO_NAMESPACE" rollout status deploy/kyverno-admission-controller --timeout=300s 2>/dev/null || true
+    kubectl -n "$KYVERNO_NAMESPACE" rollout status deploy/kyverno-background-controller --timeout=300s 2>/dev/null || true
+    kubectl -n "$KYVERNO_NAMESPACE" rollout status deploy/kyverno-cleanup-controller --timeout=300s 2>/dev/null || true
+
+    wait_for_kyverno_crds
+}
+
+wait_for_kyverno_crds() {
+    log "⏳ Waiting for Kyverno CRDs to become available..."
+    for i in {1..60}; do
+        if kubectl get crd clusterpolicies.kyverno.io &>/dev/null && \
+           kubectl get crd policies.kyverno.io &>/dev/null; then
+            log "✅ Kyverno CRDs are available."
+            return 0
+        fi
+        sleep 2
+    done
+
+    log "❌ Kyverno CRDs did not become available in time."
+    return 1
+}
+
+apply_kyverno_policy() {
+    log "📌 Applying Kyverno policy: $KYVERNO_POLICY_FILE"
+
+    if [ ! -f "$KYVERNO_POLICY_FILE" ]; then
+        log "❌ Kyverno policy file not found: $KYVERNO_POLICY_FILE"
+        exit 1
+    fi
+
+    # Ensure CRDs exist first
+    wait_for_kyverno_crds
+
+    kubectl apply -f "$KYVERNO_POLICY_FILE"
+
+    log "✅ Kyverno policy applied successfully."
+    kubectl get clusterpolicy enforce-vlan-ready-nodes 2>/dev/null || true
+}
+
+############################################
+# Function: Create & Apply VLAN Scripts ConfigMap
+############################################
+apply_vlan_manager_scripts_configmap() {
+  echo "🔧 Generating VLAN Manager Scripts ConfigMap dynamically..."
+
+  NAMESPACE="kube-system"
+  CONFIGMAP_NAME="vlan-manager-scripts"
+
+  ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  SCRIPTS_DIR="${ROOT_DIR}/scripts"
+
+  # Safety checks
+  if [[ ! -d "${SCRIPTS_DIR}" ]]; then
+    echo "❌ Scripts directory not found: ${SCRIPTS_DIR}"
+    exit 1
+  fi
+
+  if ! command -v kubectl >/dev/null 2>&1; then
+    echo "❌ kubectl not found in PATH"
+    exit 1
+  fi
+
+  echo "📁 Using scripts directory: ${SCRIPTS_DIR}"
+
+  # Delete existing ConfigMap (safe & idempotent)
+  kubectl -n "${NAMESPACE}" delete cm "${CONFIGMAP_NAME}" \
+    --ignore-not-found=true
+
+  # Create ConfigMap dynamically from scripts directory
+  kubectl -n "${NAMESPACE}" create cm "${CONFIGMAP_NAME}" \
+    --from-file="${SCRIPTS_DIR}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+  if [[ $? -ne 0 ]]; then
+    echo "❌ Failed to create ${CONFIGMAP_NAME}"
+    exit 1
+  fi
+
+  echo "✅ ${CONFIGMAP_NAME} ConfigMap created/updated successfully"
 }
 
 # === Function to get Kubernetes node count ===
@@ -136,7 +251,7 @@ kubectl apply -f 03-vlan-manager-rbac.yaml || exit 1
 
 # === Step 3: Apply ConfigMaps ===
 echo "✅ Applying ConfigMap for VLAN Manager Scripts..."
-kubectl apply -f 04-vlan-manager-scripts-configmap.yaml || exit 1
+apply_vlan_manager_scripts_configmap
 
 echo "✅ Applying ConfigMap for VLAN Manager Configuration..."
 kubectl apply -f 00-vlan-manager-configmap.yaml || exit 1
@@ -219,7 +334,12 @@ if [ $i -eq 10 ]; then
     exit 1
 fi
 
-# === Step 7: Deploy VLAN Manager DaemonSet ===
+# === Step 7: Install Kyverno + Apply VLAN-ready Policy ===
+echo "🚀 Installing Kyverno and applying VLAN-ready policy..."
+install_kyverno
+apply_kyverno_policy
+
+# === Step 8: Deploy VLAN Manager DaemonSet ===
 echo "🚀 Deploying VLAN Manager DaemonSet..."
 Create_vlan_manager_daemonset
 

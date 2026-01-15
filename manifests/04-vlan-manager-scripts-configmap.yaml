@@ -131,7 +131,6 @@ data:
                 return 1
             fi
         }
-
         
         # === Serialized reboot logic (CoreDNS-aware) ===
         serialized_reboot() {
@@ -690,6 +689,18 @@ data:
         NODE_NAME=$(kubectl get nodes -o json | jq -r '.items[] | select(.status.addresses[]?.address == "'"$NODE_IP"'") | .metadata.name')
         log "🌐 Node Name: $NODE_NAME"
         
+        # === VLAN Ready Label Helpers ===
+        mark_node_vlan_ready() {
+            log "🏷️ Marking node '$NODE_NAME' as vlan-ready=true (unblocks app scheduling via Kyverno)..."
+            kubectl label node "$NODE_NAME" vlan-ready=true --overwrite
+            log "✅ Node label applied: vlan-ready=true"
+        }
+        
+        clear_node_vlan_ready_label() {
+            log "🏷️ Clearing node '$NODE_NAME' vlan-ready label (blocks app scheduling via Kyverno)..."
+            kubectl label node "$NODE_NAME" vlan-ready- 2>/dev/null || true
+        }
+        
         # === Fetch Public IP of the Node ===
         log "🌐 Fetching Public IP of the instance..."
         PUBLIC_IP=$(kubectl get node $NODE_NAME -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}' | awk {'print $1'})
@@ -754,7 +765,7 @@ data:
         if is_vpc_attached; then
             VPC_PRESENT=true
         fi
-
+        
         log "🔎 State summary: VLAN_PRESENT=${VLAN_PRESENT}, ENABLE_VPC_INTERFACE=${ENABLE_VPC_INTERFACE}, VPC_PRESENT=${VPC_PRESENT}"
         
         # 2a) If VLAN is attached and VPC is either disabled or already attached => just do routes/firewall and iptables, no reboot
@@ -767,12 +778,17 @@ data:
             sleep infinity
         fi
         
-        # 2b) VLAN attached but VPC missing (and VPC enabled) => attach only VPC, then reboot ONCE
+        # 2b) VLAN attached and either:
+        #     - VPC is disabled (ENABLE_VPC_INTERFACE != true), OR
+        #     - VPC is already present
+        #     => No config-update, no reboot; just routes/firewall/iptables.
         if [[ "$VLAN_PRESENT" == true ]]; then
             log "✅ VLAN is attached and VPC state is satisfied (either disabled or already present). Skipping config-update and reboot."
             push_route
             create_and_attach_firewall
             configure_vlan_ew_firewall
+            # ✅ Unblock application scheduling only after success
+            mark_node_vlan_ready
             log "🛌 VLAN/VPC configuration and firewall complete. Sleeping indefinitely..."
             sleep infinity
         fi
@@ -875,6 +891,9 @@ data:
             fi
         }
         trap cleanup EXIT
+        
+        # ✅ Unblock application scheduling only after success
+        mark_node_vlan_ready
         
         log "✅ VLAN Attachment completed successfully."
         log "🌐 Instance $LINODE_ID is now connected to VLAN $VLAN_LABEL with IP $IP_ADDRESS."
@@ -1271,59 +1290,44 @@ data:
         from flask_cors import CORS
         import os
         import ipaddress
-        import json
         import sys
         import time
-        from filelock import FileLock
         import requests
-        from concurrent.futures import ThreadPoolExecutor
-        from datetime import datetime, timedelta
-        import asyncio
-        import aiohttp
-        import psutil
+        import random
         import signal
         import configparser
-        import etcd3
-        import random
+        import yaml
+        import uuid
+        import psutil
+        from datetime import datetime
+        from filelock import FileLock
         
-        # Initialize Flask application instance
+        import etcd3
+        from kubernetes import client, config
+        
         app = Flask(__name__)
-        # Enable Cross-Origin Resource Sharing (CORS) for this Flask app
         CORS(app)
         
-        # Define the log file path for logging allocation and healthcheck events
         LOG_FILE = "/tmp/allocate-ip.log"
-        
-        # Maximum number of log lines to retain in the log file
         MAX_LOG_LINES = 1000
-        
-        # Maximum backoff time in seconds for retry loops (e.g., API retries)
         MAX_BACKOFF = 60
         
-        # Cache dictionary to store VLAN IPs with a TTL for performance
         VLAN_IP_CACHE = {
             "ips": None,
             "timestamp": None,
-            "ttl_seconds": int(os.getenv("CACHE_TTL_SECONDS", 60))
+            "ttl_seconds": int(os.getenv("CACHE_TTL_SECONDS", 0)),
         }
         
-        # Cache to validate region metadata to reduce repetitive API calls
         REGION_CACHE = {"valid": False, "timestamp": None, "ttl_seconds": 3600}
         
         
-        # Signal handler to gracefully shutdown the app when terminated
         def graceful_exit(signalnum, frame):
             log(f"[INFO] Received signal {signalnum}. Shutting down gracefully...")
             sys.exit(0)
         
         
-        # Register signal handlers for SIGTERM and SIGINT (Ctrl+C)
         signal.signal(signal.SIGTERM, graceful_exit)
-        
-        # Register signal handlers for SIGTERM and SIGINT (Ctrl+C)
         signal.signal(signal.SIGINT, graceful_exit)
-        
-        
         
         def validate_environment():
             REGION = os.getenv("REGION")
@@ -1333,10 +1337,10 @@ data:
             if not os.getenv("ETCD_ENDPOINTS"):
                 log("[ERROR] ETCD_ENDPOINTS environment variable not set.")
                 sys.exit(1)
-        
             log("[INFO] Environment validation passed.")
         
-        def log(message):
+        
+        def log(message: str):
             timestamped_message = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
             print(timestamped_message)
             sys.stdout.flush()
@@ -1344,62 +1348,17 @@ data:
             try:
                 with FileLock(LOG_FILE + ".lock"):
                     lines = []
-        
-                    # Read existing log if available
                     if os.path.exists(LOG_FILE):
                         with open(LOG_FILE, "r") as f:
                             lines = f.read().splitlines()
         
-                    # Append new log entry and trim if necessary
                     lines.append(timestamped_message)
                     lines = lines[-MAX_LOG_LINES:]
         
-                    # Write back to log file
                     with open(LOG_FILE, "w") as f:
                         f.write("\n".join(lines) + "\n")
             except Exception as e:
                 print(f"[ERROR] Failed to write to log file: {str(e)}")
-        
-        
-        def api_request_with_retry(url, headers, retries=3, backoff=2, jitter=True):
-            """
-            Make an HTTP GET request with retry, exponential backoff, and optional jitter.
-            """
-            for attempt in range(1, retries + 1):
-                try:
-                    response = requests.get(url, headers=headers, timeout=5)
-        
-                    if response.status_code == 200:
-                        try:
-                            return response.json()
-                        except ValueError:
-                            log(f"[ERROR] Invalid JSON response on attempt {attempt}: {response.text}")
-                            return None
-        
-                    elif response.status_code == 429:
-                        wait_time = int(response.headers.get("Retry-After", 5))
-                        log(f"[WARN] Rate limited (429). Retrying after {wait_time}s (attempt {attempt}/{retries})")
-                        time.sleep(wait_time)
-        
-                    elif response.status_code >= 500:
-                        log(f"[WARN] Server error {response.status_code} on attempt {attempt}. Retrying...")
-                        _sleep_with_backoff(backoff, attempt, jitter)
-        
-                    else:
-                        log(f"[WARN] API error {response.status_code} on attempt {attempt}. Retrying...")
-                        _sleep_with_backoff(backoff, attempt, jitter)
-        
-                except (requests.ConnectionError, requests.Timeout) as e:
-                    log(f"[ERROR] Network error on attempt {attempt}: {str(e)}. Retrying...")
-                    _sleep_with_backoff(backoff, attempt, jitter)
-        
-                except requests.RequestException as e:
-                    log(f"[ERROR] Unexpected error on attempt {attempt}: {str(e)}. Retrying...")
-                    _sleep_with_backoff(backoff, attempt, jitter)
-        
-            log(f"[ERROR] API call failed after {retries} attempts.")
-            return None
-        
         
         def _sleep_with_backoff(base_backoff, attempt, jitter=True):
             wait_time = min(base_backoff * (2 ** (attempt - 1)), MAX_BACKOFF)
@@ -1408,126 +1367,157 @@ data:
             log(f"[DEBUG] Waiting {wait_time:.2f}s before retrying...")
             time.sleep(wait_time)
         
+        def api_request_with_retry(url, headers, retries=3, backoff=2, jitter=True):
+            for attempt in range(1, retries + 1):
+                try:
+                    response = requests.get(url, headers=headers, timeout=8)
         
-        def fetch_linode_token(config_file='/root/.linode-cli/linode-cli'):
+                    if response.status_code == 200:
+                        try:
+                            return response.json()
+                        except ValueError:
+                            log(f"[ERROR] Invalid JSON response on attempt {attempt}: {response.text}")
+                            return None
+        
+                    if response.status_code == 429:
+                        wait_time = int(response.headers.get("Retry-After", 5))
+                        log(f"[WARN] Rate limited (429). Retrying after {wait_time}s (attempt {attempt}/{retries})")
+                        time.sleep(wait_time)
+                        continue
+        
+                    if response.status_code >= 500:
+                        log(f"[WARN] Server error {response.status_code} on attempt {attempt}. Retrying...")
+                        _sleep_with_backoff(backoff, attempt, jitter)
+                        continue
+        
+                    log(f"[WARN] API error {response.status_code} on attempt {attempt}. Retrying...")
+                    _sleep_with_backoff(backoff, attempt, jitter)
+        
+                except (requests.ConnectionError, requests.Timeout) as e:
+                    log(f"[ERROR] Network error on attempt {attempt}: {str(e)}. Retrying...")
+                    _sleep_with_backoff(backoff, attempt, jitter)
+                except requests.RequestException as e:
+                    log(f"[ERROR] Unexpected error on attempt {attempt}: {str(e)}. Retrying...")
+                    _sleep_with_backoff(backoff, attempt, jitter)
+        
+            log(f"[ERROR] API call failed after {retries} attempts.")
+            return None
+        
+        def normalize_ip(s: str) -> str:
             """
-            Read the Linode CLI config file and extract the token for the default user.
-        
-            Args:
-                config_file (str): Path to the Linode CLI configuration file
-        
-            Returns:
-                str: The token value, or None if not found
+            Normalize anything like '192.168.0.10', '192.168.0.10/24', ' 192.168.0.10/24 '
+            into bare IP: '192.168.0.10'
             """
+            if not s:
+                return ""
+            s = s.strip()
+            return s.split("/", 1)[0].strip()
+        
+        def fetch_linode_token(config_file="/root/.linode-cli/linode-cli"):
             if not os.path.exists(config_file):
                 log(f"[ERROR] Configuration file {config_file} not found")
                 return None
         
-            config = configparser.ConfigParser()
-        
+            cfg = configparser.ConfigParser()
             try:
-                config.read(config_file)
+                cfg.read(config_file)
         
-                if 'DEFAULT' not in config or 'default-user' not in config['DEFAULT']:
+                if "DEFAULT" not in cfg or "default-user" not in cfg["DEFAULT"]:
                     log(f"[ERROR] No 'default-user' found in {config_file}")
                     return None
         
-                default_user = config['DEFAULT']['default-user']
-        
-                if default_user not in config:
+                default_user = cfg["DEFAULT"]["default-user"]
+                if default_user not in cfg:
                     log(f"[ERROR] User profile '{default_user}' not found in {config_file}")
                     return None
         
-                token = config[default_user].get('token')
+                token = cfg[default_user].get("token")
                 if not token:
                     log(f"[ERROR] No token found for user '{default_user}' in {config_file}")
                     return None
         
                 return token
-        
             except Exception as e:
                 log(f"[ERROR] Exception while reading configuration file: {str(e)}")
                 return None
         
         def fetch_assigned_ips():
+            # Cache
             if (
-                    VLAN_IP_CACHE["ips"] is not None
-                    and VLAN_IP_CACHE["timestamp"] is not None
-                    and (datetime.now() - VLAN_IP_CACHE["timestamp"]).total_seconds() < VLAN_IP_CACHE["ttl_seconds"]
+                VLAN_IP_CACHE["ips"] is not None
+                and VLAN_IP_CACHE["timestamp"] is not None
+                and (datetime.now() - VLAN_IP_CACHE["timestamp"]).total_seconds() < VLAN_IP_CACHE["ttl_seconds"]
             ):
                 log("[INFO] Using cached VLAN IPs")
                 return VLAN_IP_CACHE["ips"]
         
             LINODE_TOKEN = fetch_linode_token()
             REGION = os.getenv("REGION")
-        
             if not REGION:
                 log("[ERROR] REGION environment variable not set")
-                raise EnvironmentError("REGION environment variable not set")
+                return []
         
             if not LINODE_TOKEN:
                 log("[ERROR] Missing Linode Token")
-                return None
+                return []
         
             headers = {"Authorization": f"Bearer {LINODE_TOKEN}"}
-            log(f"[DEBUG] Fetching VLAN IPs for region: {REGION}")
-        
-            url = "https://api.linode.com/v4/linode/instances"
-            instances = api_request_with_retry(url, headers={"Authorization": f"Bearer {LINODE_TOKEN}",
-                                                             "X-Filter": f'{{"region": "{REGION}"}}'})
-        
-            if not instances:
-                log("[ERROR] Failed to fetch Linode instances")
-                return None
-        
-            linode_ids = [str(l["id"]) for l in instances.get("data", [])]
-            log(f"[DEBUG] Linode IDs fetched: {linode_ids}")
+            log(f"[DEBUG] Fetching Linode instances in region: {REGION}")
         
             vlan_ips = []
+            page = 1
+            total_pages = 1
         
-            def fetch_configs(linode_id):
-                try:
-                    log(f"[DEBUG] Fetching VLAN IPs for Linode ID: {linode_id}")
-                    config_url = f"https://api.linode.com/v4/linode/instances/{linode_id}/configs"
-                    configs = api_request_with_retry(config_url, headers)
-                    if not configs:
-                        log(f"[ERROR] Failed to fetch configurations for Linode ID {linode_id}")
-                        return []
-                    linode_vlan_ips = []
-                    for config in configs.get("data", []):
-                        for iface in config.get("interfaces", []):
+            while page <= total_pages:
+                url = f"https://api.linode.com/v4/linode/instances?page={page}&page_size=100"
+                response = api_request_with_retry(url, headers={**headers, "X-Filter": f'{{"region": "{REGION}"}}'})
+                if not response or "data" not in response:
+                    log(f"[ERROR] Failed to fetch instances on page {page}")
+                    break
+        
+                if page == 1:
+                    total_pages = response.get("pages", 1)
+                    log(f"[DEBUG] Total pages of instances: {total_pages}")
+        
+                for linode in response["data"]:
+                    linode_id = linode.get("id")
+                    if not linode_id:
+                        continue
+        
+                    config_list_url = f"https://api.linode.com/v4/linode/instances/{linode_id}/configs"
+                    configs = api_request_with_retry(config_list_url, headers=headers)
+                    if not configs or "data" not in configs:
+                        continue
+        
+                    for c in configs["data"]:
+                        cid = c.get("id")
+                        if not cid:
+                            continue
+        
+                        config_view_url = f"https://api.linode.com/v4/linode/instances/{linode_id}/configs/{cid}"
+                        config_view = api_request_with_retry(config_view_url, headers=headers)
+                        if not config_view or "interfaces" not in config_view:
+                            continue
+        
+                        for iface in config_view["interfaces"]:
                             if iface.get("purpose") == "vlan":
-                                ip_address = iface.get("ipam_address")
-                                if ip_address:
-                                    linode_vlan_ips.append(ip_address)
-                                    log(f"[DEBUG] Found VLAN IP: {ip_address}")
-                    return linode_vlan_ips
-                except Exception as e:
-                    log(f"[ERROR] Exception in fetch_configs for Linode ID {linode_id}: {str(e)}")
-                    return []
+                                ipam = iface.get("ipam_address")
+                                if ipam:
+                                    ip = normalize_ip(ipam)
+                                    if ip:
+                                        vlan_ips.append(ip)
+                                        log(f"[DEBUG] Found VLAN IP from Linode: {ip}")
         
-            max_workers = int(os.getenv("MAX_WORKERS", 20))
-            max_workers = min(max_workers, max(1, len(linode_ids)))
-            if max_workers == 1 and len(linode_ids) > 1:
-                log(f"[WARN] Only 1 worker thread available with {len(linode_ids)} Linode instances. Possible API rate limiting.")
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                results = executor.map(fetch_configs, linode_ids)
-                for result in results:
-                    vlan_ips.extend(result)
-        
-            log(f"[DEBUG] All VLAN IPs in region {REGION}: {vlan_ips}")
+                page += 1
         
             VLAN_IP_CACHE["ips"] = vlan_ips
             VLAN_IP_CACHE["timestamp"] = datetime.now()
-        
+            log(f"[INFO] Total VLAN IPs fetched: {len(vlan_ips)}")
             return vlan_ips
         
         def system_health_check():
             load_avg = os.getloadavg()
             mem = psutil.virtual_memory()
-            mem_info = f"Total: {mem.total / (1024 ** 2):.2f} MB, Used: {mem.used / (1024 ** 2):.2f} MB, Free: {mem.free / (1024 ** 2):.2f} MB"
-            log(f"[INFO] System Load Average: {load_avg}")
-            log(f"[INFO] Memory Information: {mem_info}")
             if load_avg[0] > os.cpu_count() * 2:
                 log("[WARN] High system load detected")
                 return False
@@ -1541,10 +1531,8 @@ data:
             if not endpoints:
                 raise EnvironmentError("ETCD_ENDPOINTS not set in environment")
         
-            # Try each endpoint until successful
             for ep in endpoints.split(","):
-                ep = ep.replace("http://", "").replace("https://", "").rstrip("/")  # Normalize scheme and slashes
-        
+                ep = ep.strip().replace("http://", "").replace("https://", "").rstrip("/")
                 parts = ep.split(":")
                 if len(parts) != 2:
                     log(f"[ERROR] Invalid ETCD endpoint format: {ep}. Expected format: host:port")
@@ -1558,10 +1546,10 @@ data:
                     continue
         
                 try:
-                    client = etcd3.client(host=host, port=port)
-                    client.status()  # Health check
+                    c = etcd3.client(host=host, port=port)
+                    c.status()
                     log(f"[INFO] Connected to etcd: {host}:{port}")
-                    return client
+                    return c
                 except Exception as e:
                     log(f"[WARN] Failed to connect to etcd endpoint {host}:{port}: {str(e)}")
                     continue
@@ -1569,23 +1557,61 @@ data:
             raise ConnectionError("Unable to connect to any etcd endpoint")
         
         
-        # =======================
-        # 🟢 Allocate IP Endpoint Sandip
-        # =======================
-        @app.route('/allocate', methods=['POST'])
+        def get_etcd():
+            endpoints = os.getenv("ETCD_ENDPOINTS", "").split(",")
+            for ep in endpoints:
+                ep = ep.strip().replace("http://", "").replace("https://", "").rstrip("/")
+                if not ep:
+                    continue
+                if ":" in ep:
+                    host, port = ep.split(":")
+                else:
+                    host, port = ep, "2379"
+                try:
+                    c = etcd3.client(host=host, port=int(port))
+                    c.status()
+                    return c
+                except Exception:
+                    continue
+            raise RuntimeError("No healthy etcd endpoints")
+        
+        def k8s_api():
+            try:
+                config.load_incluster_config()
+            except Exception:
+                config.load_kube_config()
+            return client.BatchV1Api(), client.CoreV1Api()
+        
+        def reserved_set(ip_net: ipaddress.IPv4Network) -> set:
+            """
+            Reserved:
+              - network address (x.x.x.0)
+              - first usable host (x.x.x.1 if available)
+              - broadcast address (x.x.x.255)
+            """
+            res = set()
+            res.add(str(ip_net.network_address))
+            res.add(str(ip_net.broadcast_address))
+            # first usable host if any
+            hosts = list(ip_net.hosts())
+            if hosts:
+                res.add(str(hosts[0]))
+            return res
+        
+        @app.route("/allocate", methods=["POST"])
+        
         def allocate_ip():
             try:
-                subnet = request.json.get('subnet')
+                data = request.get_json(silent=True) or {}
+                subnet = data.get("subnet")
                 if not subnet:
                     log("[ERROR] Subnet not provided")
                     return jsonify({"error": "Subnet not provided"}), 400
         
                 REGION = os.getenv("REGION")
                 if not REGION:
-                    log("[ERROR] Region not provided")
+                    log("[ERROR] REGION not provided")
                     return jsonify({"error": "Region not provided"}), 400
-        
-                log(f"[DEBUG] Subnet: {subnet}, Region: {REGION}")
         
                 try:
                     ip_net = ipaddress.ip_network(subnet, strict=False)
@@ -1594,111 +1620,121 @@ data:
                     log("[ERROR] Invalid subnet format")
                     return jsonify({"error": "Invalid subnet format"}), 400
         
-                # Connect to etcd
                 etcd = get_etcd_connection()
-                if not etcd:
-                    return jsonify({"error": "Unable to connect to etcd"}), 500
         
-                # Fetch all IPs already used from etcd
-                etcd_used_ips = set()
-                for value, meta in etcd.get_prefix("/vlan/ip/"):
-                    if meta.key:
-                        etcd_used_ips.add(meta.key.decode("utf-8").replace("/vlan/ip/", ""))
+                # ---- Build used IP set from etcd (normalize BOTH old + new styles) ----
+                etcd_used_bare = set()
+                for _value, meta in etcd.get_prefix("/vlan/ip/"):
+                    if not meta.key:
+                        continue
+                    key = meta.key.decode("utf-8")
+                    raw = key.replace("/vlan/ip/", "", 1)        # may be '192.168.0.10' or '192.168.0.10/24'
+                    bare = normalize_ip(raw)
+                    if bare:
+                        etcd_used_bare.add(bare)
         
-                log(f"[DEBUG] IPs found in etcd: {etcd_used_ips}")
+                # ---- Add Linode assigned VLAN IPs (bare) ----
+                linode_assigned_bare = set(fetch_assigned_ips() or [])
+                used_bare = etcd_used_bare.union(linode_assigned_bare)
         
-                # ✅ Fetch all Linode-assigned VLAN IPs (even if not in etcd)
-                linode_assigned_ips = set(fetch_assigned_ips())
-        
-                # ✅ Merge both to get full list of used IPs
-                used_ips = etcd_used_ips.union(linode_assigned_ips)
-        
-                # Sync missing IPs into etcd
-                missing_in_etcd = linode_assigned_ips - etcd_used_ips
-                for ip in missing_in_etcd:
-                    try:
-                        etcd.put(f"/vlan/ip/{ip}", "true")
-                        log(f"[SYNC] Added missing Linode-assigned IP to etcd: {ip}")
-                    except Exception as e:
-                        log(f"[ERROR] Failed to sync IP {ip} to etcd: {str(e)}")
-        
-                used_ips = etcd_used_ips.union(linode_assigned_ips)
-        
-                # Determine reserved IPs
-                hosts = list(ip_net.hosts())
-                if len(hosts) >= 3:
-                    reserved_ips = {
-                        str(hosts[0]),
-                        str(hosts[1]),
-                        str(hosts[-1])
+                # ---- Sync Linode IPs into etcd using canonical bare key (atomic-ish) ----
+                for bare in (linode_assigned_bare - etcd_used_bare):
+                    key_bare = f"/vlan/ip/{bare}"
+                    payload = {
+                        "status": "allocated",
+                        "source": "linode-sync",
+                        "region": REGION,
+                        "subnet": str(ip_net),
+                        "allocated_at": datetime.utcnow().isoformat() + "Z",
+                        "linode_id": None,
+                        "notes": "Discovered via Linode API",
                     }
-                else:
-                    reserved_ips = set()
+                    try:
+                        etcd.transaction(
+                            compare=[etcd.transactions.version(key_bare) == 0],
+                            success=[etcd.transactions.put(key_bare, yaml.safe_dump(payload))],
+                            failure=[],
+                        )
+                        log(f"[SYNC] Added Linode-assigned IP to etcd (bare key): {bare}")
+                    except Exception as e:
+                        log(f"[WARN] Failed syncing {bare}: {str(e)}")
         
-                skipped_reserved = 0
-                attempted_ips = 0
+                # Recompute
+                used_bare = used_bare.union(linode_assigned_bare)
         
-                # Begin IP scan
-                for ip in hosts:
-                    candidate_ip = f"{ip}{cidr_suffix}"
-                    attempted_ips += 1
+                res = reserved_set(ip_net)
         
-                    if candidate_ip in reserved_ips:
-                        log(f"[INFO] Skipping Reserved IP: {candidate_ip}")
-                        skipped_reserved += 1
+                # Iterate usable hosts only (safe)
+                for host_ip in ip_net.hosts():
+                    bare = str(host_ip)
+        
+                    if bare in res:
+                        log(f"[INFO] Skipping Reserved IP: {bare}")
                         continue
         
-                    if candidate_ip in used_ips:
-                        log(f"[INFO] Skipping Already Allocated IP: {candidate_ip}")
+                    if bare in used_bare:
                         continue
+        
+                    # Canonical key (NEW)
+                    key_bare = f"/vlan/ip/{bare}"
+        
+                    # Old key style (if your initializer still writes it): /vlan/ip/<ip>/<prefix>
+                    key_old_cidr = f"/vlan/ip/{bare}{cidr_suffix}"
+        
+                    payload = {
+                        "status": "allocated",
+                        "source": "api-allocate",
+                        "region": REGION,
+                        "subnet": str(ip_net),
+                        "allocated_at": datetime.utcnow().isoformat() + "Z",
+                        "linode_id": None,
+                        "notes": "",
+                    }
         
                     try:
-                        key = f"/vlan/ip/{candidate_ip}"
-                        txn_success, _ = etcd.transaction(
+                        # Transaction: allocate ONLY if neither bare-key nor old-cidr-key exists
+                        ok, _ = etcd.transaction(
                             compare=[
-                                etcd.transactions.version(key) == 0  # Key must not exist
+                                etcd.transactions.version(key_bare) == 0,
+                                etcd.transactions.version(key_old_cidr) == 0,
                             ],
                             success=[
-                                etcd.transactions.put(key, "true")
+                                etcd.transactions.put(key_bare, yaml.safe_dump(payload)),
                             ],
-                            failure=[]
+                            failure=[],
                         )
         
-                        if txn_success:
-                            log(f"[SUCCESS] Allocated IP: {candidate_ip}")
-                            return jsonify({"allocated_ip": candidate_ip}), 200
-                        else:
-                            log(f"[INFO] Race condition — IP was just taken: {candidate_ip}")
-                            continue
+                        if ok:
+                            allocated_cidr = f"{bare}{cidr_suffix}"
+                            log(f"[SUCCESS] Allocated IP: {allocated_cidr} (stored as bare key {key_bare})")
+                            return jsonify({
+                                "allocated_ip": allocated_cidr,   # backward compatible
+                                "ip": bare,                       # useful for UI/logic
+                                "cidr": cidr_suffix
+                            }), 200
+        
                     except Exception as e:
-                        log(f"[ERROR] etcd put failed for {candidate_ip}: {str(e)}")
+                        log(f"[ERROR] etcd transaction failed for {bare}: {str(e)}")
                         return jsonify({"error": f"Failed to allocate IP: {str(e)}"}), 500
         
-                error_msg = (
-                    f"No IPs available in subnet {subnet}. "
-                    f"Attempted {attempted_ips} IPs, "
-                    f"{skipped_reserved} were reserved, "
-                    f"{len(used_ips)} already allocated."
-                )
-                log(f"[ERROR] {error_msg}")
-                return jsonify({"error": error_msg}), 400
+                msg = f"No IPs available in subnet {subnet}. Used={len(used_bare)}, Reserved={len(res)}"
+                log(f"[ERROR] {msg}")
+                return jsonify({"error": msg}), 400
         
             except Exception as e:
                 log(f"[ERROR] Unexpected error in /allocate endpoint: {str(e)}")
                 return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
         
         
-        # =======================
-        # 🔴 Release IP Endpoint
-        # =======================
-        @app.route('/release', methods=['POST'])
+        @app.route("/release", methods=["POST"])
+        
         def release_ip():
             try:
-                ip_address = request.json.get('ip_address')
+                data = request.get_json(silent=True) or {}
+                ip_address = data.get("ip_address")
                 if not ip_address:
                     return jsonify({"error": "IP address not provided"}), 400
         
-                ip_address = ip_address.strip()
                 REGION = os.getenv("REGION")
                 SUBNET = os.getenv("SUBNET")
                 if not REGION or not SUBNET:
@@ -1707,46 +1743,44 @@ data:
                 try:
                     ip_net = ipaddress.ip_network(SUBNET, strict=False)
                     cidr_suffix = f"/{ip_net.prefixlen}"
-                    hosts = list(ip_net.hosts())
+                except Exception:
+                    return jsonify({"error": "Invalid SUBNET env variable"}), 500
         
-                    reserved_ips = set()
-                    if len(hosts) >= 3:
-                        reserved_ips = {
-                            str(hosts[0]),
-                            str(hosts[1]),
-                            str(hosts[-1])
-                        }
+                bare = normalize_ip(ip_address)
         
-                    if ip_address in reserved_ips:
-                        log(f"[WARN] Attempted to release reserved IP: {ip_address}")
-                        return jsonify({"error": f"IP address {ip_address} is reserved and cannot be released."}), 403
+                # reserved protection
+                if bare in reserved_set(ip_net):
+                    log(f"[WARN] Attempted to release reserved IP: {bare}")
+                    return jsonify({"error": f"IP address {bare} is reserved and cannot be released."}), 403
         
-                    etcd = get_etcd_connection()
-                    if not etcd:
-                        return jsonify({"error": "Failed to connect to etcd"}), 500
+                etcd = get_etcd_connection()
         
-                    key = f"/vlan/ip/{ip_address}"
-                    deleted = etcd.delete(key)
+                key_bare = f"/vlan/ip/{bare}"
+                key_old_cidr = f"/vlan/ip/{bare}{cidr_suffix}"
         
-                    if deleted:
-                        log(f"[INFO] Released IP from etcd: {ip_address}")
-                        return jsonify({"status": "IP released", "ip": ip_address}), 200
-                    else:
-                        log(f"[WARN] IP {ip_address} not found in etcd")
-                        return jsonify({"error": f"IP address {ip_address} not found in etcd"}), 404
-        
+                deleted_any = False
+                try:
+                    if etcd.delete(key_bare):
+                        deleted_any = True
+                    if etcd.delete(key_old_cidr):
+                        deleted_any = True
                 except Exception as e:
                     log(f"[ERROR] Release failed: {str(e)}")
                     return jsonify({"error": f"Release failed: {str(e)}"}), 500
+        
+                if deleted_any:
+                    log(f"[INFO] Released IP from etcd: {bare} (deleted bare and/or old cidr key)")
+                    return jsonify({"status": "IP released", "ip": bare}), 200
+        
+                log(f"[WARN] IP {bare} not found in etcd")
+                return jsonify({"error": f"IP address {bare} not found in etcd"}), 404
         
             except Exception as e:
                 log(f"[ERROR] Unexpected error in /release endpoint: {str(e)}")
                 return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
         
-        # =======================
-        # 🔵 Health Check Endpoint
-        # =======================
-        @app.route('/health', methods=['GET'])
+        @app.route("/health", methods=["GET"])
+        
         def health_check():
             try:
                 linode_token = fetch_linode_token()
@@ -1761,60 +1795,109 @@ data:
                     return jsonify({"status": "unhealthy", "error": "REGION environment variable not set"}), 500
         
                 start_time = time.time()
-                response = requests.get("https://api.linode.com/v4/account", headers=headers, timeout=5)
-                end_time = time.time()
-                latency_ms = (end_time - start_time) * 1000
-                if latency_ms > 200:
-                    log(f"[WARN] Linode API latency is high: {latency_ms:.2f} ms")
+                response = requests.get("https://api.linode.com/v4/account", headers=headers, timeout=8)
+                latency_ms = (time.time() - start_time) * 1000
+        
                 if response.status_code == 401:
-                    log("[ERROR] Health check: Unauthorized access. Token might be invalid")
                     return jsonify({"status": "unhealthy", "error": "Unauthorized access"}), 500
                 if response.status_code != 200:
-                    log(f"[ERROR] Health check: Failed to connect to Linode API, status {response.status_code}")
                     return jsonify({"status": "unhealthy", "error": "Failed to connect to Linode API"}), 500
         
-                response = requests.get("https://api.linode.com/v4/networking/ips", headers=headers, timeout=5)
+                response = requests.get("https://api.linode.com/v4/networking/ips", headers=headers, timeout=8)
                 if response.status_code != 200:
-                    log(f"[ERROR] Health check: Failed to access networking API, status {response.status_code}")
                     return jsonify({"status": "unhealthy", "error": "Failed to access networking API"}), 500
         
-                if (
-                        REGION_CACHE["timestamp"] is None
-                        or (datetime.now() - REGION_CACHE["timestamp"]).total_seconds() > REGION_CACHE["ttl_seconds"]
-                ):
-                    response = requests.get(f"https://api.linode.com/v4/regions/{REGION}", headers=headers, timeout=5)
-                    if response.status_code != 200:
-                        log(f"[ERROR] Health check: Invalid or unavailable region {REGION}, status {response.status_code}")
-                        return jsonify({"status": "unhealthy", "error": f"Invalid or unavailable region {REGION}"}), 500
-                    REGION_CACHE["valid"] = True
-                    REGION_CACHE["timestamp"] = datetime.now()
-                elif not REGION_CACHE["valid"]:
-                    log(f"[ERROR] Health check: Cached result indicates invalid region {REGION}")
-                    return jsonify({"status": "unhealthy", "error": f"Invalid or unavailable region {REGION}"}), 500
-                try:
-                    etcd = get_etcd_connection()
-                    etcd.status()
-                except Exception as e:
-                    log(f"[ERROR] Health check: Failed to connect to etcd: {str(e)}")
-                    return jsonify({"status": "unhealthy", "error": f"etcd connection failed: {str(e)}"}), 500
+                # etcd
+                etcd = get_etcd_connection()
+                etcd.status()
         
                 if not system_health_check():
-                    log("[ERROR] Health check: System health checks failed")
                     return jsonify({"status": "unhealthy", "error": "System health checks failed"}), 500
         
-                log("[INFO] Health check: All checks passed")
                 return jsonify({"status": "healthy", "latency_ms": latency_ms}), 200
         
-            except requests.RequestException as e:
-                log(f"[ERROR] Health check: Network connectivity error: {str(e)}")
-                return jsonify({"status": "unhealthy", "error": f"Network connectivity error: {str(e)}"}), 500
             except Exception as e:
-                log(f"[ERROR] Health check: Unexpected error: {str(e)}")
-                return jsonify({"status": "unhealthy", "error": f"Unexpected error: {str(e)}"}), 500
+                log(f"[ERROR] Health check: {str(e)}")
+                return jsonify({"status": "unhealthy", "error": str(e)}), 500
         
-        # =======================
-        # 🚀 Start Flask Application
-        # =======================
-        if __name__ == '__main__':
+        @app.get("/api/v1/vlan-ips")
+        
+        def list_ips():
+            prefix = os.getenv("ETCD_PREFIX", "/vlan/ip/")
+            ips = []
+            etcd = get_etcd()
+        
+            for _value, meta in etcd.get_prefix(prefix):
+                key = meta.key.decode()
+                raw = key.split(prefix, 1)[1]
+                bare = normalize_ip(raw)
+                if bare:
+                    ips.append(bare)
+        
+            ips = sorted(set(ips), key=lambda s: [int(x) for x in s.split(".")])
+            return jsonify({"ips": ips})
+        
+        @app.post("/api/v1/refresh")
+        
+        def refresh():
+            ns = os.getenv("NAMESPACE", "kube-system")
+            manifest_path = "/manifests/05-vlan-ip-initializer-job.yaml"
+        
+            with open(manifest_path, "r") as f:
+                job_def = yaml.safe_load(f)
+        
+            base_name = job_def["metadata"]["name"]
+            run_name = f"{base_name}-{uuid.uuid4().hex[:6]}"
+            job_def["metadata"]["name"] = run_name
+            job_def["metadata"]["namespace"] = ns
+        
+            batch, _ = k8s_api()
+            batch.create_namespaced_job(namespace=ns, body=job_def)
+            return jsonify({"jobName": run_name})
+        
+        @app.get("/api/v1/refresh/<job_name>/detail")
+        def refresh_detail(job_name):
+            ns = os.getenv("NAMESPACE", "kube-system")
+            batch, core = k8s_api()
+            job = batch.read_namespaced_job_status(job_name, ns)
+        
+            status = "Running"
+            started_at = job.status.start_time.isoformat() if job.status.start_time else None
+            completed_at = None
+        
+            if job.status.completion_time:
+                completed_at = job.status.completion_time.isoformat()
+                status = "Succeeded"
+        
+            for c in (job.status.conditions or []):
+                if c.type == "Failed" and c.status == "True":
+                    status = "Failed"
+                    if not completed_at and c.last_transition_time:
+                        completed_at = c.last_transition_time.isoformat()
+        
+            # best-effort pod logs
+            pod_name, logs = None, ""
+            pods = core.list_namespaced_pod(ns)
+            for p in pods.items:
+                if p.metadata and p.metadata.name and job_name in p.metadata.name:
+                    pod_name = p.metadata.name
+                    try:
+                        logs = core.read_namespaced_pod_log(name=pod_name, namespace=ns, tail_lines=500)
+                    except Exception:
+                        pass
+                    break
+        
+            return jsonify({
+                "status": status,
+                "startedAt": started_at,
+                "completedAt": completed_at,
+                "podName": pod_name,
+                "logs": logs,
+            })
+        
+        
+        if __name__ == "__main__":
             validate_environment()
-            app.run(host='0.0.0.0', port=8080, debug=True)
+            #print("DEBUG VLAN IPs from Linode:", fetch_assigned_ips())
+            #app.run(host="0.0.0.0", port=8080, debug=True)
+            app.run(host="0.0.0.0", port=8080, debug=False)

@@ -53,7 +53,7 @@ rules:
   # Permissions to read node information
 - apiGroups: [""]
   resources: ["nodes"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["get", "list", "watch", "patch", "update"]
 
   # Permissions to impersonate service accounts
 - apiGroups: [""]

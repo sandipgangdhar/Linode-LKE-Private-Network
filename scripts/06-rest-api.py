@@ -974,4 +974,5 @@ def refresh_detail(job_name):
 if __name__ == "__main__":
     validate_environment()
     #print("DEBUG VLAN IPs from Linode:", fetch_assigned_ips())
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    #app.run(host="0.0.0.0", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=8080, debug=False)

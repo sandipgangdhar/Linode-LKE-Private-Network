@@ -640,6 +640,18 @@ log "🌐 Fetching NODE NAME of the instance..."
 NODE_NAME=$(kubectl get nodes -o json | jq -r '.items[] | select(.status.addresses[]?.address == "'"$NODE_IP"'") | .metadata.name')
 log "🌐 Node Name: $NODE_NAME"
 
+# === VLAN Ready Label Helpers ===
+mark_node_vlan_ready() {
+    log "🏷️ Marking node '$NODE_NAME' as vlan-ready=true (unblocks app scheduling via Kyverno)..."
+    kubectl label node "$NODE_NAME" vlan-ready=true --overwrite
+    log "✅ Node label applied: vlan-ready=true"
+}
+
+clear_node_vlan_ready_label() {
+    log "🏷️ Clearing node '$NODE_NAME' vlan-ready label (blocks app scheduling via Kyverno)..."
+    kubectl label node "$NODE_NAME" vlan-ready- 2>/dev/null || true
+}
+
 # === Fetch Public IP of the Node ===
 log "🌐 Fetching Public IP of the instance..."
 PUBLIC_IP=$(kubectl get node $NODE_NAME -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}' | awk {'print $1'})
@@ -726,6 +738,8 @@ if [[ "$VLAN_PRESENT" == true ]]; then
     push_route
     create_and_attach_firewall
     configure_vlan_ew_firewall
+    # ✅ Unblock application scheduling only after success
+    mark_node_vlan_ready
     log "🛌 VLAN/VPC configuration and firewall complete. Sleeping indefinitely..."
     sleep infinity
 fi
@@ -828,6 +842,9 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+# ✅ Unblock application scheduling only after success
+mark_node_vlan_ready
 
 log "✅ VLAN Attachment completed successfully."
 log "🌐 Instance $LINODE_ID is now connected to VLAN $VLAN_LABEL with IP $IP_ADDRESS."
