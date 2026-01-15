@@ -1,0 +1,162 @@
+# 00-vlan-manager-configmap.yaml
+#
+# This ConfigMap is used to configure the VLAN & VPC Manager for Linode LKE.
+# It holds important networking parameters like subnet, VLAN labels, destination routes,
+# VPC subnet details, firewall toggles, and Linode CLI configurations to automate:
+#   - VLAN attachment (eth1)
+#   - VPC interface attachment (eth2)
+#   - Static route push on worker nodes
+#   - Linode Firewall creation/attachment
+#   - VLAN east–west iptables rules on the node
+#
+# -----------------------------------------------------
+# 📝 Parameters:
+#
+# Core:
+# 1️⃣ SUBNET              - Primary subnet for VLAN IP allocation (Linode side).
+# 2️⃣ VLAN_LABEL          - Label identifier for the VLAN in Linode.
+# 3️⃣ REGION              - Linode region (e.g., in-maa).
+# 4️⃣ LKE_CLUSTER_ID      - LKE cluster ID (used for firewall label/attachment).
+#
+# Routing:
+# 5️⃣ ENABLE_PUSH_ROUTE   - "true"/"false": whether to push static routes on nodes.
+# 6️⃣ ROUTE_LIST          - List of (route_ip, dest_subnet) pairs for static routes.
+#
+# Firewall:
+# 7️⃣ ENABLE_FIREWALL     - "true"/"false": whether to create/attach Linode Firewall.
+#
+# VPC Interface (eth2):
+# 8️⃣ ENABLE_VPC_INTERFACE - "true"/"false": whether to attach a VPC interface as eth2.
+# 9️⃣ VPC_SUBNET_ID        - Linode VPC subnet_id to attach as the VPC interface.
+# 🔟 VPC_INTERFACE_INDEX   - Interface index in Linode config (2 => eth2).
+#
+# VLAN East–West iptables:
+# 1️⃣1️⃣ ENABLE_VLAN_EW_FIREWALL - "true"/"false": apply iptables to block NEW inbound on VLAN.
+# 1️⃣2️⃣ VLAN_INTERFACE_NAME     - VLAN interface name on node (default eth1).
+#
+# Kubernetes & Linode CLI:
+# 1️⃣3️⃣ KUBECONFIG          - Path to kubeconfig inside the pod.
+# 1️⃣4️⃣ LINODE_API_KEY      - API token used by linode-cli and scripts.
+# 1️⃣5️⃣ LINODE_CLI_CONFIG   - linode-cli INI configuration content.
+#
+# -----------------------------------------------------
+# ⚠️ Security Warning:
+#
+# - Avoid hardcoding real tokens in plain YAML for production.
+# - Prefer using Secrets for LINODE_API_KEY and mounting via envFrom or projected volumes.
+#
+# -----------------------------------------------------
+# 🖋️ Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+#
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vlan-manager-config
+  namespace: kube-system
+data:
+  # ==========================
+  # Route Push Configuration
+  # ==========================
+  # Set ENABLE_PUSH_ROUTE to "true" if your LKE cluster needs to communicate
+  # with external resources (e.g., AWS, GCP, on-prem) over a Site-to-Site VPN.
+  #
+  # If set to "false", no static routes will be pushed, and ROUTE_LIST will be ignored.
+  ENABLE_PUSH_ROUTE: "false"
+
+  # ROUTE_LIST:
+  # - route_ip:     Gateway IP on the VLAN side (typically your NAT/VPN server VLAN IP).
+  # - dest_subnet:  Destination subnet that should be routed via route_ip.
+  #
+  # You can define one or more routes here.
+  ROUTE_LIST: |
+    - route_ip: "172.16.0.1"
+      dest_subnet: "192.168.0.0/16"
+    - route_ip: "172.16.0.1"
+      dest_subnet: "10.1.0.0/16"
+
+  # ==========================
+  # Linode Firewall Attachment
+  # ==========================
+  # Set to "false" if you don't want to create/attach the Linode Cloud Firewall
+  # to your LKE worker nodes automatically.
+  ENABLE_FIREWALL: "true"
+
+  # Linode LKE Cluster ID (used to build firewall label & attach to all workers)
+  LKE_CLUSTER_ID: "537168"
+
+  # ==========================
+  # VLAN Subnet Configuration
+  # ==========================
+  # Primary subnet for VLAN IP allocation (Linode side).
+  # This is the pool from which /03-script-ip-allocate.sh picks addresses.
+  SUBNET: "10.0.0.0/24"
+
+  # Linode Region Name
+  REGION: "in-bom-2"
+
+  # VLAN label used in Linode VLAN configuration
+  VLAN_LABEL: "private-lan"
+
+  # ==========================
+  # VPC Interface (eth2) Configuration
+  # ==========================
+  # ENABLE_VPC_INTERFACE:
+  #   - "true"  => Attach a VPC interface as a third NIC (eth2) in Linode config.
+  #   - "false" => Do not touch VPC interface; script behaves as legacy VLAN-only mode.
+  ENABLE_VPC_INTERFACE: "true"
+
+  # VPC_SUBNET_ID:
+  #   - The numeric subnet_id of your Linode VPC subnet (e.g., 12345).
+  #   - This subnet will be attached as "purpose: vpc" at interface index 2 (eth2).
+  VPC_SUBNET_ID: "179917"
+
+  # VPC_INTERFACE_INDEX:
+  #   - Index in the Linode config "interfaces" array for VPC.
+  #   - "0" => eth0, "1" => eth1, "2" => eth2, etc.
+  #   - We use "2" so layout becomes:
+  #       eth0 = public
+  #       eth1 = VLAN
+  #       eth2 = VPC
+  VPC_INTERFACE_INDEX: "2"
+
+  # ==========================
+  # VLAN East–West iptables Guard Rails
+  # ==========================
+  # ENABLE_VLAN_EW_FIREWALL:
+  #   - "true"  => Add iptables rules on node:
+  #       - ACCEPT ESTABLISHED,RELATED on VLAN interface
+  #       - DROP all NEW inbound on VLAN interface
+  #     This prevents east–west traffic from initiating directly to workers on VLAN.
+  #   - "false" => Skip iptables configuration for VLAN EW firewall.
+  ENABLE_VLAN_EW_FIREWALL: "true"
+
+  # VLAN_INTERFACE_NAME:
+  #   - Name of the VLAN interface on worker nodes.
+  #   - Default in this architecture is "eth1".
+  #   - The script can also auto-detect via ipam_address, but this gives a stable default.
+  VLAN_INTERFACE_NAME: "eth1"
+
+  # ==========================
+  # Kubernetes & Linode CLI
+  # ==========================
+  # Path to the Kubeconfig file used by the DaemonSet container
+  KUBECONFIG: "/tmp/kubeconfig"
+
+  # Linode API token used by linode-cli.
+  # In production, consider switching this to a Secret instead of ConfigMap.
+  LINODE_API_KEY: "xxxxxxx"
+
+  # linode-cli configuration file content
+  LINODE_CLI_CONFIG: |
+      [DEFAULT]
+      default-user = sandip
+
+      [sandip]
+      token =  xxxxxxxxxxxxx
+      region = in-maa
+      authorized_users = sgangdha
+      suppress-version-warning = true

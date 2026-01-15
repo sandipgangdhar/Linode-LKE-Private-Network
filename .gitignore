@@ -1,1 +1,2 @@
 manifests/00-vlan-manager-configmap.yaml
+.DS_Store
