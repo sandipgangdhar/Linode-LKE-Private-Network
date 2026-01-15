@@ -7,7 +7,8 @@ RUN mkdir -p /mnt/vlan-ip /root/.linode-cli
 RUN apt-get update && apt-get install -y \
     jq curl parallel net-tools apt-transport-https \
     ca-certificates iproute2 bash gnupg \
-    iputils-ping dnsutils && \
+    iputils-ping dnsutils \
+    iptables ipset && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

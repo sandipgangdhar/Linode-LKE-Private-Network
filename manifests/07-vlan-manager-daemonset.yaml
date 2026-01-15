@@ -76,8 +76,8 @@ spec:
           command: ["/bin/bash", "-c"]
           args: 
             - |
-              echo "⏳ Waiting 60 seconds for DNS and Kubernetes API to stabilize..."
-              sleep 60
+              #echo "⏳ Waiting 60 seconds for DNS and Kubernetes API to stabilize..."
+              #sleep 60
               echo "🔄 Starting VLAN Manager Setup..."
 
               # === Configure Linode CLI ===
@@ -86,12 +86,6 @@ spec:
               chmod 600 /root/.linode-cli/* && \
               export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli" && \
               echo "✅ Linode CLI configuration completed."
-
-              # === Install iptables inside the container (Debian 12) ===
-              echo "📦 Installing iptables package inside vlan-manager container..."
-              apt-get update -y >/dev/null 2>&1 || apt-get update -y
-              apt-get install -y iptables >/dev/null 2>&1 || apt-get install -y iptables
-              echo "✅ iptables installation complete (if available)."
 
               # === Copy Scripts ===
               cp --dereference /root/scripts/02-script-vlan-attach.sh /tmp/02-script-vlan-attach.sh && \

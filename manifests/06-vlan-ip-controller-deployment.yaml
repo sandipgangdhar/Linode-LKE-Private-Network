@@ -81,11 +81,6 @@ spec:
               chmod u+x /tmp/06-rest-api.py && \
               echo "✅ copy of 06-rest-api.py from /root/scripts/ to /tmp completed."
 
-              # === Install required kubernetes python module===
-              echo "📦 Installing kubernetes python module..."
-              pip3 install kubernetes >/dev/null 2>&1
-              echo "✅ kubernetes python module installation complete"
-
               # Start the Flask application and log to file
               echo "Running 06-rest-api.py script"
               #sleep infinity 
