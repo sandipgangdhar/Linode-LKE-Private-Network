@@ -1,0 +1,43 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: enforce-vlan-ready-nodes
+  annotations:
+    policies.kyverno.io/title: Enforce VLAN-ready Nodes for Application Workloads
+    policies.kyverno.io/category: Scheduling
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >
+      Automatically adds required node affinity so application pods schedule
+      only on nodes labeled vlan-ready=true. Excludes kube-system and Kyverno namespaces.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: add-vlan-ready-nodeaffinity
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+                - kube-public
+                - kube-node-lease
+      mutate:
+        patchStrategicMerge:
+          spec:
+            # If affinity doesn't exist, this creates it.
+            # If it exists, this merges into it.
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                    - matchExpressions:
+                        - key: vlan-ready
+                          operator: In
+                          values:
+                            - "true"
