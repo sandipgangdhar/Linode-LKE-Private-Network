@@ -1,0 +1,187 @@
+# 03-vlan-manager-rbac.yaml
+# 
+# This YAML file defines the Role-Based Access Control (RBAC) for the VLAN Manager in Linode LKE.
+# It specifies the required permissions for the VLAN Manager to interact with Kubernetes resources
+# like Pods, Nodes, ConfigMaps, and PersistentVolumeClaims.
+# 
+# -----------------------------------------------------
+# Components:
+# 
+# 1. ServiceAccount      - Provides an identity for VLAN Manager pods to access the API.
+# 2. ClusterRole         - Grants global access to Node objects for listing and watching.
+# 3. ClusterRoleBinding  - Binds the ClusterRole to the ServiceAccount.
+# 4. Role                - Grants namespace-specific access to pods, PVCs, and configmaps.
+# 5. RoleBinding         - Binds the Role to the ServiceAccount within the namespace.
+# 
+# -----------------------------------------------------
+# Usage:
+# 
+# - This RBAC configuration allows the VLAN Manager to:
+#   - List, get, watch, create, update, delete, patch nodes, pods, PVCs, and ConfigMaps.
+#   - Impersonate service accounts to perform VLAN configurations.
+#   - Manage leases for leader election.
+# 
+# -----------------------------------------------------
+# Best Practices:
+# 
+# - Follow the principle of least privilege: only grant permissions that are required.
+# - Regularly audit RBAC permissions to prevent privilege escalation.
+# - Consider adding NetworkPolicies for namespace isolation if needed.
+# 
+# -----------------------------------------------------
+# Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+#                                                                                                    #
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025                                 #
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  # Defines the ServiceAccount for VLAN Manager
+  name: vlan-manager-sa
+  namespace: kube-system
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  # Cluster-wide role for accessing node information
+  name: vlan-manager-clusterrole
+rules:
+  # Permissions to read node information
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch", "patch", "update"]
+
+  # Permissions to impersonate service accounts
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["impersonate"]  
+
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list"]
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  # Binds the ClusterRole to the ServiceAccount
+  name: vlan-manager-clusterrolebinding
+subjects:
+- kind: ServiceAccount
+  name: vlan-manager-sa
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: vlan-manager-clusterrole
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  # Namespace-specific role for pod access
+  name: vlan-manager-pod-access
+  namespace: kube-system
+rules:
+  # Permissions for managing pods
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: kube-system
+  name: vlan-manager-role
+rules:
+  # Permissions for managing various Kubernetes objects
+- apiGroups: [""]
+  resources: ["configmaps", "persistentvolumeclaims", "pods", "endpoints", "nodes"]
+  verbs: ["get", "list", "create", "update", "delete", "patch", "watch"]
+  
+  # Permissions for managing leader election leases
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "create", "update", "delete", "patch", "watch"]
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  # Binds the Role to the ServiceAccount within the namespace
+  name: vlan-manager-pod-access-binding
+  namespace: kube-system
+subjects:
+- kind: ServiceAccount
+  name: vlan-manager-sa
+  namespace: kube-system
+roleRef:
+  kind: Role
+  name: vlan-manager-pod-access
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  # Binds the Role to the ServiceAccount within the namespace
+  name: vlan-manager-rolebinding
+  namespace: kube-system
+subjects:
+- kind: ServiceAccount
+  name: vlan-manager-sa
+  namespace: kube-system
+roleRef:
+  kind: Role
+  name: vlan-manager-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+
+# Read-only access to exactly one Secret (vlan-manager-secrets), scoped by
+# resourceNames rather than a blanket "secrets" grant - vlan-manager-sa can
+# read this one object and nothing else with that verb/resource pair, even
+# if another Secret gets created in kube-system later.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: kube-system
+  name: vlan-manager-secret-access
+rules:
+#
+# Note: `resourceNames` only constrains request-scoped verbs (get/watch on a
+# named object) - it can't scope `list`, since list has no target name and
+# would still enumerate every Secret in the namespace even with this filter
+# in place. That's why `list` is deliberately left out here: nothing in this
+# repo's scripts calls `kubectl get secrets` (plural/list) against this
+# ServiceAccount, only `get` of the one named Secret via env/volume refs.
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["vlan-manager-secrets"]
+  verbs: ["get", "watch"]
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vlan-manager-secret-access-binding
+  namespace: kube-system
+subjects:
+- kind: ServiceAccount
+  name: vlan-manager-sa
+  namespace: kube-system
+roleRef:
+  kind: Role
+  name: vlan-manager-secret-access
+  apiGroup: rbac.authorization.k8s.io

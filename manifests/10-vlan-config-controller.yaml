@@ -1,0 +1,183 @@
+# 10-vlan-config-controller.yaml
+#
+# This YAML file defines the Deployment for the VLAN Configuration Controller.
+#
+# The Controller is responsible for:
+#   - Watching desired interface configuration stored in etcd
+#   - Reconciling Linode config interfaces (VLAN / VPC / PUBLIC)
+#   - Updating Linode config via linode-cli
+#   - Marking reconciliation status back in etcd
+#
+# Unlike the DaemonSet (node-side agent), this runs as a SINGLE control-plane
+# reconciliation component inside the cluster.
+#
+# -----------------------------------------------------
+# Parameters:
+#
+# 1. replicas              - Single replica (acts as leader/controller)
+# 2. serviceAccountName    - Reuses vlan-manager-sa (existing RBAC)
+# 3. hostNetwork           - Not required (no OS-level networking here)
+# 4. image                 - Same container image as vlan-manager
+# 5. command & args        - Loads controller script from ConfigMap
+# 6. volumeMounts          - Mount controller script dynamically
+# 7. env                   - Uses vlan-manager-config ConfigMap
+#
+# -----------------------------------------------------
+# Flow:
+#
+# DaemonSet Node:
+#   → Writes desired interface state into etcd
+#   → Triggers serialized shutdown
+#
+# Controller:
+#   → Polls etcd
+#   → Detects "pending" desired state
+#   → Applies linode config-update
+#   → Marks status="applied"
+#
+# -----------------------------------------------------
+# Best Practices:
+#
+# - Keep replicas = 1 (controller pattern)
+# - Reuse existing vlan-manager-sa
+# - Avoid hostNetwork (not needed here)
+# - Keep reconciliation idempotent
+# - Log clearly for debugging
+#
+# -----------------------------------------------------
+# Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+#
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vlan-config-controller
+  namespace: kube-system
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: vlan-config-controller
+
+  template:
+    metadata:
+      labels:
+        app: vlan-config-controller
+
+    spec:
+      serviceAccountName: vlan-manager-sa
+
+      # Pin to the dedicated infra pool - keeps the controller off any node
+      # that vlan-manager will shut down/reconfigure for VLAN attachment.
+      # See 08-etcd-StatefulSet-3node.yaml for the same pattern/rationale.
+      nodeSelector:
+        infra-pool: "true"
+      tolerations:
+        - key: "infra-pool"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+      # Spread the 2 replicas across different nodes so a single node loss
+      # never takes out both controller pods at once (previously had no
+      # anti-affinity at all).
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - vlan-config-controller
+              topologyKey: "kubernetes.io/hostname"
+
+      containers:
+        - name: vlan-config-controller
+          image: ghcr.io/sandipgangdhar/linode-lke-private-network:latest
+
+          securityContext:
+            privileged: false
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "[CONTROLLER] [INFO] $(date '+%Y-%m-%d %H:%M:%S') Starting VLAN Config Controller (bootstrap)..."
+
+              # Configure Linode CLI
+              mkdir -p /root/.linode-cli
+              echo "$LINODE_CLI_CONFIG" > /root/.linode-cli/linode-cli
+              chmod 600 /root/.linode-cli/linode-cli
+              export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
+
+              # Copy controller script
+              cp --dereference /root/scripts/07-vlan-config-controller-scripts.sh /tmp/controller.sh
+              chmod +x /tmp/controller.sh
+
+              # Start controller loop
+              /tmp/controller.sh
+
+          env:
+            - name: LINODE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vlan-manager-secrets
+                  key: LINODE_API_KEY
+
+            - name: LINODE_CLI_CONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: vlan-manager-secrets
+                  key: LINODE_CLI_CONFIG
+
+            - name: ETCD_ENDPOINTS
+              value: "${ETCD_ENDPOINTS}"
+
+            - name: MAX_CONCURRENT_JOBS
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: MAX_CONCURRENT_JOBS
+
+            - name: JOB_WAIT_TIMEOUT_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: JOB_WAIT_TIMEOUT_SECONDS
+
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: LOG_LEVEL
+                  optional: true
+
+          volumeMounts:
+            - name: vlan-manager-scripts
+              mountPath: /root/scripts
+
+      volumes:
+        - name: vlan-manager-scripts
+          configMap:
+            name: vlan-manager-scripts
+
+---
+# PodDisruptionBudget: with 2 replicas + the anti-affinity above (one per
+# node), this stops cluster-autoscaler/kubectl drain from voluntarily
+# evicting both replicas' nodes back-to-back - at least 1 controller
+# (and therefore leader-election candidate) must stay up, so a pending
+# etcd job always has someone able to pick it up.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vlan-config-controller-pdb
+  namespace: kube-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: vlan-config-controller

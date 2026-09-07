@@ -1,0 +1,474 @@
+# 00-vlan-manager-configmap.yaml
+#
+# This ConfigMap is used to configure the VLAN & VPC Manager for Linode LKE.
+# It holds important networking parameters like subnet, VLAN labels, destination routes,
+# VPC subnet details, firewall toggles, and Linode CLI configurations to automate:
+#   - VLAN attachment (eth1)
+#   - VPC interface attachment (eth2)
+#   - Static route push on worker nodes
+#   - Linode Firewall creation/attachment
+#   - VLAN east–west iptables rules on the node
+#
+# -----------------------------------------------------
+# Parameters (kept in sync with the `data:` block below - if you add a
+# new key, add it here too):
+#
+# Core:
+# 1. LKE_CLUSTER_TYPE    - "standard"/"enterprise": selects interface build order & fallback naming.
+# 2. ENABLE_VLAN         - "true"/"false": master switch for the VLAN attach feature itself.
+# 3. SUBNET              - Primary subnet for VLAN IP allocation (Linode side).
+# 4. VLAN_LABEL          - Label identifier for the VLAN in Linode.
+# 5. REGION              - Linode region (e.g., in-maa).
+# 6. LKE_CLUSTER_ID      - LKE cluster ID (used for firewall label/attachment).
+# 23. APP_POOL_ID         - Pool id(s) to auto-label/taint if you created the app-pool(s)
+#                          yourself without setting their app-pool=true label yet
+#                          (bootstrap-only, comma-separated for more than one pool - see
+#                          NOTE below and docs/DEPLOYMENT.md Installation step 1).
+#
+# Routing:
+# 7. ENABLE_PUSH_ROUTE   - "true"/"false": whether to push static routes on nodes.
+# 8. ROUTE_LIST          - List of (route_ip, dest_subnet) pairs for specific site-to-site
+#                          VPN/on-prem subnet routes only - NOT for whole-of-internet routing,
+#                          see NAT Gateway below for that.
+#
+# NAT Gateway (route ALL internet-bound traffic via one instance on the VLAN):
+# 25. ENABLE_NAT_GATEWAY - "true"/"false": whether to route this node's internet-bound traffic
+#                          via a single NAT gateway instance on the VLAN. Independent of
+#                          ENABLE_PUSH_ROUTE/ROUTE_LIST above - a different feature.
+# 26. NAT_GATEWAY_IP     - Required if ENABLE_NAT_GATEWAY="true". The NAT gateway instance's own
+#                          IP on this VLAN. That's the only other input needed - the route metric
+#                          used to make this win over the node's own default route is fixed
+#                          internally, not a ConfigMap key (see the data: section below for why).
+#
+# NAT Fleet (route internet-bound traffic via an HA/ECMP linode-nat-gateway fleet instead of
+# a single instance - mutually exclusive with ENABLE_NAT_GATEWAY above, only one may be "true"):
+# 27. ENABLE_NAT_FLEET               - "true"/"false": whether to run the client-agent sidecar and
+#                                      let it manage this node's default route via ECMP across a
+#                                      whole NAT fleet, instead of one static NAT gateway instance.
+# 28. NAT_FLEET_ROSTER_URL            - Required if ENABLE_NAT_FLEET="true". The fleet's roster
+#                                      endpoint, e.g. http://<natctl-host-VLAN-IP>:8099/fleet/<pool>.
+# 29. NAT_FLEET_FALLBACK_PROBE_ENABLED  - Optional, default unset/false. Opt-in belt-and-suspenders
+#                                      direct health probing on top of trusting the roster's own
+#                                      "healthy" field. Leave unset unless you have a specific
+#                                      reason - a single-node fleet already auto-enables its own
+#                                      equivalent probe on the fleet side, don't duplicate it.
+# 30. NAT_FLEET_FALLBACK_PROBE_INTERVAL - Optional. Only meaningful if the above is "true" (valid
+#                                      range 3-60 seconds).
+# 31. NAT_FLEET_HEALTH_PROBE_TIMEOUT    - Optional. Timeout for that same opt-in probe.
+#
+# Firewall:
+# 9. ENABLE_FIREWALL     - "true"/"false": whether to create/attach Linode Firewall.
+#                          Ignored entirely on LKE_CLUSTER_TYPE=enterprise - see
+#                          docs/TROUBLESHOOTING.md #11.
+#
+# VPC Interface (eth2):
+# 10. ENABLE_VPC_INTERFACE - "true"/"false": whether to attach a VPC interface as eth2.
+# 11. VPC_SUBNET_ID        - Linode VPC subnet_id to attach as the VPC interface.
+#
+# VLAN East–West iptables:
+# 12. ENABLE_VLAN_EW_FIREWALL - "true"/"false": apply iptables to block NEW inbound on VLAN.
+#
+# VLAN IP Controller:
+# 13. CACHE_TTL_SECONDS  - How long vlan-ip-controller caches its Linode VLAN-IP scan.
+#
+# Logging (applies to all six components - vlan-manager, vlan-ip-controller,
+# vlan-ip-initializer, vlan-config-controller, vlan-ip-reconciler; etcd has
+# its own fixed --log-level flag, not driven by this key):
+# 24. LOG_LEVEL - One of DEBUG/INFO/WARN/ERROR (default INFO if unset or
+#                unrecognized). DEBUG adds per-candidate/per-item detail
+#                (e.g. every IP allocation candidate considered, every CAS
+#                race lost) that's useful for troubleshooting but too noisy
+#                to run with permanently. Optional - safe to leave unset on
+#                an existing deployment, every component defaults to INFO.
+#
+# Optional add-ons:
+# 14. ENABLE_KYVERNO       - "true"/"false": install Kyverno + the linode-lke-vlan-gating policy.
+# 15. ENABLE_IP_RECONCILER - "true"/"false": deploy the orphaned-VLAN-IP reconciler CronJob.
+#
+# infra-pool opt-in automation (see the NOTE block above the data: section
+# for the full rationale):
+# 19. AUTO_CREATE_INFRA_POOL - "true"/"false": let the script create infra-pool for you.
+# 20. INFRA_POOL_PLAN        - Linode plan/type id, required if AUTO_CREATE_INFRA_POOL="true".
+# 21. INFRA_POOL_NODE_COUNT  - How many infra-pool nodes (minimum 3, not just a default).
+# 22. INFRA_POOL_ID          - Pool id to auto-label/taint if you created infra-pool yourself.
+#
+# vlan-config-controller tuning:
+# 16. MAX_CONCURRENT_JOBS      - How many pending reconfigure jobs to process at once.
+# 17. JOB_WAIT_TIMEOUT_SECONDS - How long to wait for offline/running before giving up on a job.
+#
+# Kubernetes & Linode CLI:
+# 18. KUBECONFIG          - Path to kubeconfig inside the pod (not a credential itself -
+#                          the actual auth token is generated at runtime from the
+#                          pod's auto-mounted, auto-rotated ServiceAccount token).
+#
+# NOTE: app-pool scheduling uses two layers together, not just one. The
+# "vlan-not-ready" node taint (configured at node-pool creation/config time,
+# outside this ConfigMap - see docs/DAY2-OPERATIONS.md "Applying the
+# vlan-not-ready taint") is now PERMANENT and never removed - LKE reconciles
+# pool-level taints indefinitely, so trying to clear it per-node was a fight
+# we couldn't win. The actual dynamic "is this node ready" signal is the
+# vlan-ready=true node label, enforced via ENABLE_KYVERNO's
+# linode-lke-vlan-gating policy - a CEL-based MutatingPolicy
+# (manifests/09-kyverno-vlan-ready-mutatingpolicy.yaml) on any current
+# cluster, falling back automatically to the legacy ClusterPolicy
+# (manifests/09-kyverno-vlan-ready-policy.yaml) on an older Kyverno install -
+# which requires that label via nodeSelector (a map - collision-free across
+# independent projects' policies, unlike the old nodeAffinity/
+# nodeSelectorTerms design) and grants the toleration needed to get past the
+# permanent taint. See either file's header comment for the full history.
+#
+# NOTE on interface naming/ordering: there is no VLAN_INTERFACE_NAME or
+# VPC_INTERFACE_INDEX key. Which NIC ends up eth0/eth1/eth2 is derived
+# automatically from LKE_CLUSTER_TYPE (see "Interface layout by cluster
+# type" in docs/DEPLOYMENT.md), and the actual VLAN interface name on the
+# node OS is auto-detected at runtime by get_vlan_interface_name() in
+# 02-script-vlan-attach.sh (falls back to eth1 only if detection fails on
+# a Standard cluster) - neither is a configurable ConfigMap value, despite
+# earlier revisions of this file listing them as if they were.
+#
+# NOTE: LINODE_API_KEY and LINODE_CLI_CONFIG used to live here in plaintext.
+# They now live in a separate Kubernetes Secret instead - see
+# 00-vlan-manager-secret.example.template.yaml. Copy that file the same way
+# you copy this one (to 00-vlan-manager-secret.yaml, gitignored) and fill in
+# your real token there, not in this ConfigMap.
+#
+# -----------------------------------------------------
+# Security Warning:
+#
+# - Avoid hardcoding real tokens or secrets in this file - it's a ConfigMap,
+#   not a Secret, and is meant only for non-sensitive configuration.
+#
+# -----------------------------------------------------
+# Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+#
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vlan-manager-config
+  namespace: kube-system
+data:
+  LKE_CLUSTER_TYPE: "enterprise"        # standard|enterprise
+  # LKE_CLUSTER_TYPE: "standard"        # standard|enterprise
+  # ==========================
+  # Route Push Configuration
+  # ==========================
+  # Set ENABLE_PUSH_ROUTE to "true" if your LKE cluster needs to communicate
+  # with external resources (e.g., AWS, GCP, on-prem) over a Site-to-Site VPN.
+  #
+  # If set to "false", no static routes will be pushed, and ROUTE_LIST will be ignored.
+  # ENABLE_PUSH_ROUTE: "false"
+  ENABLE_PUSH_ROUTE: "true"
+
+  # ROUTE_LIST:
+  # - route_ip:     Gateway IP on the VLAN side (e.g. your VPN server's VLAN IP).
+  # - dest_subnet:  Destination subnet that should be routed via route_ip.
+  #
+  # For specific site-to-site VPN/on-prem subnets only - NOT for routing all
+  # internet traffic through a single box. dest_subnet "0.0.0.0/0" is
+  # rejected here on purpose; see NAT Gateway below for that use case.
+  #
+  # You can define one or more routes here.
+  ROUTE_LIST: |
+    - route_ip: "10.80.0.254"
+      dest_subnet: "10.2.0.0/16"
+    - route_ip: "10.80.0.254"
+      dest_subnet: "10.8.0.0/16"
+
+  # ==========================
+  # NAT Gateway (route ALL internet-bound traffic via one instance on the VLAN)
+  # ==========================
+  # A separate, dedicated feature from ROUTE_LIST above - not a Site-to-Site
+  # VPN, but "send this node's normal internet-bound traffic through a
+  # single NAT gateway Linode instance sitting on the same VLAN" (e.g.
+  # because your nodes don't have their own public IP, or you want a single
+  # known egress IP for external allow-lists). Local traffic - pod-to-pod,
+  # node-to-node, node-to-VPC-component, CoreDNS - is never affected: those
+  # already resolve via more-specific local routes that always win
+  # regardless of this setting.
+  #
+  # Only two inputs, by design - see push_nat_gateway_route() in
+  # scripts/02-script-vlan-attach.sh:
+  #   1. ENABLE_NAT_GATEWAY - "true" to turn this on, "false" (default) to
+  #      leave the node's own default route alone.
+  #   2. NAT_GATEWAY_IP     - the NAT gateway instance's own IP on this VLAN.
+  #
+  # What you will NOT find here, on purpose: a route "metric" setting. A
+  # node's existing default route (e.g. its own public interface) has to be
+  # deprioritized, not removed, for this to work safely - the script always
+  # does that internally with a fixed, tested metric value. Exposing that as
+  # a tunable would just be one more thing to misconfigure for no real
+  # benefit to anyone turning this feature on.
+  #
+  # ENABLE_NAT_GATEWAY: "true"
+  ENABLE_NAT_GATEWAY: "false"
+
+  # Required only if ENABLE_NAT_GATEWAY is "true".
+  NAT_GATEWAY_IP: ""
+
+  # ==========================
+  # NAT Fleet (HA/ECMP egress via a linode-nat-gateway fleet)
+  # ==========================
+  # The HA/scale answer to the single-node NAT Gateway above. Instead of one
+  # static route to one instance, a sidecar container (client-agent, bundled
+  # into this image at build time - see manifests/Dockerfile) long-polls a
+  # linode-nat-gateway fleet's roster API and maintains a Linux resilient
+  # nexthop group as this node's default route, spreading egress across
+  # every currently-healthy node in the fleet and reacting within a fraction
+  # of a second when the fleet's membership changes. Mutually exclusive with
+  # ENABLE_NAT_GATEWAY above - 02-script-vlan-attach.sh refuses to start
+  # (config error, sleeps indefinitely) if both are "true" at once. Local
+  # traffic is unaffected either way, same as the single-node feature.
+  #
+  # ENABLE_NAT_FLEET: "true"
+  ENABLE_NAT_FLEET: "false"
+
+  # Required only if ENABLE_NAT_FLEET is "true". The fleet's roster endpoint
+  # - reachable over the same VLAN this node already attaches to. Example:
+  # http://10.60.32.20:8099/fleet/shared
+  NAT_FLEET_ROSTER_URL: ""
+
+  # Optional advanced knobs - map directly onto client-agent's own env vars
+  # (LNG_FALLBACK_PROBE_ENABLED/LNG_FALLBACK_PROBE_INTERVAL/
+  # LNG_HEALTH_PROBE_TIMEOUT). Safe to leave all three unset: client-agent
+  # trusts the roster's own "healthy" field by default, and a single-node
+  # fleet already auto-enables its own equivalent fallback probe on the
+  # fleet side - only set NAT_FLEET_FALLBACK_PROBE_ENABLED if you have a
+  # specific reason to also probe directly from this node.
+  NAT_FLEET_FALLBACK_PROBE_ENABLED: ""
+  NAT_FLEET_FALLBACK_PROBE_INTERVAL: ""
+  NAT_FLEET_HEALTH_PROBE_TIMEOUT: ""
+
+  # ==========================
+  # Linode Firewall Attachment
+  # ==========================
+  # Set to "false" if you don't want to create/attach the Linode Cloud Firewall
+  # to your LKE worker nodes automatically.
+  #
+  # NOTE: ignored entirely when LKE_CLUSTER_TYPE=enterprise. LKE Enterprise
+  # clusters ship with their own managed firewall by default, and this
+  # feature's rules are hardcoded for Calico (LKE-E runs Cilium instead) - so
+  # 02-script-vlan-attach.sh's create_and_attach_firewall() always skips
+  # creating this custom firewall on Enterprise, regardless of this value.
+  # See docs/TROUBLESHOOTING.md #9 for detail.
+  # ENABLE_FIREWALL: "true"
+  ENABLE_FIREWALL: "false"
+
+  # Linode LKE Cluster ID (used to build firewall label & attach to all workers)
+  LKE_CLUSTER_ID: "21467"
+
+  # If you already created the app-pool(s) yourself and any of them don't
+  # carry the app-pool=true label yet, put their numeric pool id(s) here -
+  # find them with
+  # `linode-cli lke pools-list <cluster-id> --json | jq '.[] | {id, type, count, labels}'`.
+  # A cluster can legitimately have MORE than one app-pool (e.g. different
+  # instance types for different workloads, all still gated by the same
+  # vlan-ready mechanism) - list every not-yet-labeled one here,
+  # comma-separated: "123456,789012". A single id with no comma still works
+  # exactly as before. ensure_app_pool_taint() applies the app-pool=true
+  # label to each exact pool listed (never touching its existing taints -
+  # --labels and --taints.* are independent fields on this endpoint), then
+  # runs its normal taint-merge logic against EVERY pool that carries the
+  # label - both the ones already labeled before this run and the ones just
+  # bootstrapped via this list. This is bootstrap-only per pool: once a
+  # given pool's label exists, every later run (this project's or a sibling
+  # project's) finds it via the label itself, the same way it always has -
+  # an id only ever matters the one time that specific pool's label doesn't
+  # exist yet, so it's safe to leave old ids in this list indefinitely.
+  # Leave empty to add labels by hand instead, exactly as before this
+  # existed (see docs/DEPLOYMENT.md Installation step 1).
+  APP_POOL_ID: ""
+
+  # ==========================
+  # VLAN Subnet Configuration
+  # ==========================
+  # ENABLE_VLAN: "false"
+  ENABLE_VLAN: "true"
+  # Primary subnet for VLAN IP allocation (Linode side).
+  # This is the pool from which /03-script-ip-allocate.sh picks addresses.
+  SUBNET: "10.95.255.0/24"
+
+  # Linode Region Name
+  REGION: "gb-lon"
+
+  # VLAN label used in Linode VLAN configuration
+  VLAN_LABEL: "vlan-large-label"
+
+  # ==========================
+  # VLAN IP Controller: Linode-scan cache
+  # ==========================
+  # CACHE_TTL_SECONDS:
+  #   - How long (seconds) the vlan-ip-controller caches its full Linode VLAN-IP
+  #     scan (fetch_assigned_ips) before re-scanning the account/region.
+  #   - "0" disables caching entirely (every /allocate call does a full serial
+  #     scan of every instance/config in the region - slow for larger accounts).
+  #   - A short TTL (e.g. 30s) lets concurrent/rapid node-onboarding requests
+  #     reuse one recent scan instead of each re-scanning from scratch, without
+  #     meaningfully widening the staleness window. Safe to enable: actual
+  #     duplicate-allocation prevention is done via an atomic etcd
+  #     compare-and-swap on /vlan/ip/<ip>, independent of this cache.
+  CACHE_TTL_SECONDS: "30"
+
+  # ==========================
+  # Logging (applies to all six components except etcd - see comment above)
+  # ==========================
+  # LOG_LEVEL: one of DEBUG/INFO/WARN/ERROR. Defaults to INFO if unset or
+  # unrecognized - safe to leave this key out entirely on an existing
+  # deployment. Set to DEBUG temporarily while troubleshooting for
+  # per-candidate/per-item detail; not recommended to run permanently.
+  LOG_LEVEL: "INFO"
+
+  # ==========================
+  # VPC Interface (eth2) Configuration
+  # ==========================
+  # ENABLE_VPC_INTERFACE:
+  #   - "true"  => Attach a VPC interface as a third NIC (eth2) in Linode config.
+  #   - "false" => Do not touch VPC interface; script behaves as legacy VLAN-only mode.
+  ENABLE_VPC_INTERFACE: "false"
+
+  # VPC_SUBNET_ID:
+  #   - The numeric subnet_id of your Linode VPC subnet (e.g., 12345).
+  #   - This subnet will be attached as "purpose: vpc" at interface index 2 (eth2).
+  VPC_SUBNET_ID: "784822"
+
+  # ==========================
+  # VLAN East–West iptables Guard Rails
+  # ==========================
+  # ENABLE_VLAN_EW_FIREWALL:
+  #   - "true"  => Add iptables rules on node:
+  #       - ACCEPT ESTABLISHED,RELATED on VLAN interface
+  #       - DROP all NEW inbound on VLAN interface
+  #     This prevents east–west traffic from initiating directly to workers on VLAN.
+  #   - "false" => Skip iptables configuration for VLAN EW firewall.
+  ENABLE_VLAN_EW_FIREWALL: "false"
+
+  # ==========================
+  # Optional: Kyverno install + linode-lke-vlan-gating policy
+  # ==========================
+  # If ENABLE_KYVERNO is "true", Orchestration installs Kyverno and applies
+  # manifests/09-kyverno-vlan-ready-policy.yaml, which requires
+  # vlan-ready=true on any node an application pod schedules onto and
+  # grants the toleration needed to get past the permanent
+  # "vlan-not-ready" taint. See that policy file's header comment for why
+  # this replaced a plain node-taint-only design.
+  # ENABLE_KYVERNO: "false" # "true" or "false"
+  ENABLE_KYVERNO: "true" # "true" or "false"
+
+  # ==========================
+  # infra-pool: opt-in automation
+  # ==========================
+  # By default, creating infra-pool is a manual, one-time step (see
+  # docs/DEPLOYMENT.md Installation step 1) - deciding node type/plan is a
+  # real cost/region decision the script shouldn't silently guess at, and
+  # creating infrastructure has real billing impact unlike everything else
+  # this script automates (which only ever modifies existing resources).
+  #
+  # Set AUTO_CREATE_INFRA_POOL to "true" to have 00-Orchestration-Script.sh
+  # create infra-pool for you instead (requires INFRA_POOL_PLAN below), with
+  # its label/taint set correctly and CoreDNS auto-pinned afterward. Idempotent
+  # and safe to leave "true" permanently - it only ever creates the pool once
+  # (detected via the infra-pool=true label), every later run just confirms
+  # it's already there and moves on.
+  AUTO_CREATE_INFRA_POOL: "false" # "true" or "false"
+
+  # Required only if AUTO_CREATE_INFRA_POOL is "true". A Linode plan/type id
+  # for the infra-pool's nodes (e.g. "g6-standard-2") - these nodes can be
+  # small/cheap, none of etcd/vlan-config-controller/CoreDNS/Kyverno define
+  # heavy CPU/memory requests. Run `linode-cli linodes types` to see what's
+  # available in your region.
+  INFRA_POOL_PLAN: ""
+
+  # How many nodes infra-pool should have. 3 is the documented MINIMUM, not
+  # just a default - etcd's pod anti-affinity requires 3 distinct nodes to
+  # ever fully schedule (see docs/DEPLOYMENT.md "Why a dedicated infra-pool
+  # node pool"). Raise this if you need more headroom - e.g. a large
+  # cluster running many CoreDNS replicas, or room to drain one node for
+  # maintenance without touching bare-minimum quorum. Used both when
+  # AUTO_CREATE_INFRA_POOL="true" (the pool is created with this count) and
+  # as a sanity check against a manually-created pool's actual count either
+  # way (a warning, not a hard failure, if it's under 3).
+  INFRA_POOL_NODE_COUNT: "3"
+
+  # If AUTO_CREATE_INFRA_POOL is "false" (the default) and you created
+  # infra-pool yourself, put its numeric pool id here - find it with
+  # `linode-cli lke pools-list <cluster-id> --json | jq '.[] | {id, type, count}'`
+  # right after creating it. 00-Orchestration-Script.sh then applies the
+  # infra-pool=true label and taint to this exact pool automatically, every
+  # run, so you never have to hand-type --labels/--taints.* syntax yourself
+  # (a genuinely easy place to make a silent, destructive mistake - see
+  # docs/DEPLOYMENT.md Installation step 1 for why). Leave empty to fall
+  # back to doing the label/taint step by hand too, exactly as before this
+  # automation existed.
+  INFRA_POOL_ID: ""
+
+  # ==========================
+  # Optional: VLAN IP Reconciler CronJob
+  # ==========================
+  # Deleting or recycling a node (manually, via a crash, or via the cluster
+  # autoscaler) never releases the VLAN IP it was allocated - nothing calls
+  # /release on node teardown today. Left unchecked, orphaned allocations
+  # accumulate in etcd and can eventually exhaust the whole SUBNET pool,
+  # stalling every new node's VLAN attach (see docs/TROUBLESHOOTING.md).
+  #
+  # If ENABLE_IP_RECONCILER is "true", 11-vlan-ip-reconciler-cronjob.yaml is
+  # deployed and runs every 15 minutes: it compares etcd's "used" IPs against
+  # Linode's real, current VLAN attachments and releases confirmed orphans
+  # automatically. An IP must be seen as orphaned across two separate runs
+  # before it's released (never on first sighting), and any single run that
+  # would release more than MAX_AUTO_RELEASE_PER_RUN (default 20) IPs
+  # releases none of them and logs a warning instead - see the safety design
+  # notes at the top of scripts/11-vlan-ip-reconciler.sh before changing
+  # either of those defaults.
+  # ENABLE_IP_RECONCILER: "false" # "true" or "false"
+  ENABLE_IP_RECONCILER: "true" # "true" or "false"
+
+  # ==========================
+  # vlan-config-controller: job concurrency & timeout
+  # ==========================
+  # MAX_CONCURRENT_JOBS:
+  #   - How many pending VLAN/VPC reconfigure jobs the controller processes
+  #     at once, instead of one at a time. Different Linode instances are
+  #     independent of each other, and the per-job etcd compare-and-swap
+  #     already makes concurrent claims safe - this was purely a
+  #     control-loop limitation, not a correctness requirement.
+  #   - Matters most during a cluster-autoscaler burst scale-up: with the
+  #     old one-at-a-time processing, the last node in a batch of N new
+  #     nodes had to wait for all N-1 ahead of it to fully cycle through
+  #     shutdown/reconfigure/boot before its own VLAN attach even started -
+  #     and since the "vlan-not-ready" taint blocks real workload pods from
+  #     scheduling until a node is vlan-ready, that serial queue directly
+  #     delayed when new autoscaled capacity became usable by customer
+  #     workloads.
+  #   - Keep this bounded rather than unlimited - too high a value risks
+  #     enough concurrent shutdown/status-poll/boot cycles to trip Linode
+  #     API rate limits during a large simultaneous scale-up.
+  MAX_CONCURRENT_JOBS: "5"
+
+  # JOB_WAIT_TIMEOUT_SECONDS:
+  #   - How long the controller waits for a Linode instance to report
+  #     "offline" (after shutdown) or "running" (after boot) before giving
+  #     up on that one job and moving on to the next. Without this, a
+  #     single wedged instance (e.g. stuck in "shutting_down" - see
+  #     docs/TROUBLESHOOTING.md) blocks that job's concurrency slot
+  #     forever - previously, with no timeout AND serial processing, it
+  #     blocked every other queued node too.
+  #   - A job that times out is marked status=failed (with failure_reason
+  #     and failed_at) and is NOT auto-retried by the controller itself.
+  #     In practice this still self-heals: the vlan-manager DaemonSet pod
+  #     on that node resubmits a fresh "pending" job on its own next
+  #     restart if VLAN still isn't attached. A job that keeps failing
+  #     repeatedly means the underlying Linode instance genuinely needs
+  #     manual investigation, not a longer timeout.
+  JOB_WAIT_TIMEOUT_SECONDS: "300"
+
+  # ==========================
+  # Kubernetes & Linode CLI
+  # ==========================
+  # Path to the Kubeconfig file used by the DaemonSet container
+  KUBECONFIG: "/tmp/kubeconfig"
+
+  # LINODE_API_KEY and LINODE_CLI_CONFIG have moved to a Secret.
+  # See manifests/00-vlan-manager-secret.example.template.yaml.

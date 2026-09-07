@@ -1,0 +1,234 @@
+# 06-vlan-ip-controller-deployment.yaml
+#
+# CUSTOMER-REPO OVERLAY VARIANT -- see scripts/publish/assemble_customer_repo.py.
+# This file OVERWRITES the build repo's manifests/06-vlan-ip-controller-deployment.yaml
+# in the published customer repo. It exists because 06-rest-api.py is compiled
+# directly into the shared ghcr.io image at manifests/Dockerfile build time
+# (never shipped as a file in this repo at all, plaintext or compiled -- see
+# that file's own header comment: a Kubernetes ConfigMap is hard-capped
+# around 1-3MB, and a standalone Nuitka build of this file came out around
+# 146MB, nowhere close to fitting), so this container just execs the
+# already-baked-in /usr/local/bin/06-rest-api directly -- no copy-out-of-a-
+# ConfigMap-mount step at all, unlike every other scripts/*.sh reference
+# (those ship as plain text at the same filename and are delivered via the
+# vlan-manager-scripts ConfigMap as usual, so none of them need an
+# overlay). This also means this container no longer needs the
+# vlan-manager-scripts ConfigMap mounted at all. Keep this file's
+# `command`/`args`/`volumeMounts`/`volumes` in sync by hand whenever the
+# build repo's own 06-vlan-ip-controller-deployment.yaml changes anything
+# OTHER than those (env vars, resources, probes, nodeSelector, etc.) --
+# everything below this comment is otherwise a straight copy.
+#
+# This YAML file defines the Deployment and Service for the VLAN Leader Manager
+# in Linode LKE. It sets up a Flask-based REST API (compiled to a standalone
+# binary in this repo) to manage VLAN IP allocations and releases. The API is
+# exposed as a ClusterIP service.
+#
+# -----------------------------------------------------
+# Parameters:
+#
+# 1. replicas              - The number of pod replicas to deploy.
+# 2. serviceAccountName    - The ServiceAccount with RBAC permissions.
+# 3. image                 - Docker image used to run the Flask app.
+# 4. command & args        - Shell commands to initialize Flask and scripts.
+# 5. volumeMounts          - Mount paths for scripts and VLAN IP storage.
+# 6. ports                 - Port exposure configuration for the service.
+#
+# -----------------------------------------------------
+# Usage:
+#
+# - This Deployment initializes the Flask API, mounts necessary scripts, and
+#   connects to the VLAN IP storage for dynamic IP management.
+# - The API is exposed using a Kubernetes `Service` of type `ClusterIP`.
+#
+# -----------------------------------------------------
+# Best Practices:
+#
+# - Use liveness and readiness probes for better health checks.
+# - Avoid hardcoded IPs; use environment variables or ConfigMaps.
+#
+# -----------------------------------------------------
+# Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+#
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Name and namespace for the deployment
+  name: vlan-ip-controller
+  namespace: kube-system
+
+
+spec:
+  # Number of replicas to maintain
+  replicas: 3
+
+
+  selector:
+    matchLabels:
+      app: vlan-ip-controller
+
+  template:
+    metadata:
+      labels:
+        app: vlan-ip-controller
+
+    spec:
+      # Pinned to infra-pool - NOT app-pool - matching etcd's/
+      # vlan-config-controller's exact nodeSelector+toleration pattern (not
+      # the wildcard-toleration+nodeAffinity pattern used for app-pool
+      # workloads: infra-pool isn't documented anywhere in this repo as a
+      # pool shared with sibling projects the way app-pool explicitly is,
+      # so there's no "another project's own taint might land here too"
+      # concern to defend against with a wildcard toleration).
+      #
+      # This used to require app-pool, the same nodes vlan-manager shuts
+      # down/reboots as part of every VLAN (and now VPC) attach. Confirmed
+      # live: when multiple/all app-pool nodes go through that cycle at once
+      # (e.g. a fresh cluster's initial onboarding, where every app-pool
+      # node races through attach at roughly the same time), this
+      # Deployment had zero eligible nodes to schedule onto, and the
+      # ReplicaSet controller rapid-fire created and failed well over a
+      # hundred replacement pod objects in under ten seconds - Kubernetes
+      # has no built-in backoff for a ReplicaSet repeatedly failing to
+      # schedule brand-new pods (container-level CrashLoopBackOff doesn't
+      # apply here; these pods never even started). It self-healed once
+      # nodes came back, but left the garbage pods behind and put unwanted
+      # load on the API server during the outage window. Moving to
+      # infra-pool - the same protection etcd/CoreDNS/vlan-config-controller
+      # already have - removes the trigger condition entirely: infra-pool
+      # nodes are never touched by the VLAN/VPC attach cycle. See
+      # docs/TROUBLESHOOTING.md entry 22 for the full incident writeup.
+      # post-migration-consolidate.sh's Step 3 now moves this Deployment
+      # (like the others) onto vlan-ready app-pool nodes once it's safe to.
+      nodeSelector:
+        infra-pool: "true"
+      tolerations:
+        - key: "infra-pool"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      # Service account with necessary RBAC permissions
+      serviceAccountName: vlan-manager-sa
+      containers:
+        - name: vlan-ip-controller
+          image: ghcr.io/sandipgangdhar/linode-lke-private-network:latest
+
+          resources:
+            requests:
+              memory: "1000Mi"
+              cpu: "500m"
+            limits:
+              memory: "1500Mi"
+              cpu: "1000m"
+
+          # Command to run the Flask API -- 06-rest-api is baked directly
+          # into the image at /usr/local/bin/06-rest-api (manifests/
+          # Dockerfile), no copy-out-of-ConfigMap step needed.
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              # Start the Flask application. Runs unredirected (stdout/stderr
+              # go straight to the container's own streams) so `kubectl logs`
+              # actually shows what's happening. The app's own structured
+              # allocation log still separately writes to
+              # /tmp/allocate-ip.log - that's unaffected by this change.
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] Launching 06-rest-api..."
+              exec /usr/local/bin/06-rest-api
+
+          # Environment variables
+          env:
+            - name: LINODE_CLI_CONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: vlan-manager-secrets
+                  key: LINODE_CLI_CONFIG
+            - name: LINODE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vlan-manager-secrets
+                  key: LINODE_API_KEY
+            - name: REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: REGION
+            - name: SUBNET
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: SUBNET
+            - name: CACHE_TTL_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: CACHE_TTL_SECONDS
+            - name: VLAN_GATEWAY_IP
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: VLAN_GATEWAY_IP
+                  optional: true
+            - name: ETCD_ENDPOINTS
+              value: "${ETCD_ENDPOINTS}"
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: LOG_LEVEL
+                  optional: true
+
+          # No vlan-manager-scripts mount here -- 06-rest-api is baked into
+          # the image, not copied out of that ConfigMap (see the header
+          # comment above).
+          volumeMounts:
+            - name: linode-cli-config
+              mountPath: /root/.linode-cli/
+
+          # Suggested Liveness and Readiness probes (Optional but recommended)
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 30
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 30
+
+      # Define the volumes to be mounted
+      volumes:
+        - name: linode-cli-config
+          secret:
+            secretName: vlan-manager-secrets
+            items:
+              - key: LINODE_CLI_CONFIG
+                path: linode-cli
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Name and namespace for the service
+  name: vlan-ip-controller-service
+  namespace: kube-system
+
+spec:
+  selector:
+    app: vlan-ip-controller
+
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+
+# Service type for internal communication
+  type: ClusterIP

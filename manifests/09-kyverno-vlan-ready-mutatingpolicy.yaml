@@ -1,0 +1,169 @@
+# 09-kyverno-vlan-ready-mutatingpolicy.yaml
+#
+# Kyverno MutatingPolicy (policies.kyverno.io/v1, CEL-based) -
+# "linode-lke-vlan-gating"
+#
+# This is the third-generation VLAN scheduling gate for this project, and
+# the direct replacement for 09-kyverno-vlan-ready-policy.yaml (the legacy
+# kyverno.io/v1 ClusterPolicy of the same name). See that file's header
+# for the full history of why this gate exists at all (nodeSelectorTerms
+# merge collisions, LKE's pool-taint reconciliation loop) - none of that
+# reasoning changed. What changed is only the policy TYPE:
+#
+#   - kyverno.io/v1 ClusterPolicy is deprecated as of Kyverno v1.19 and is
+#     scheduled for removal in v1.20 (~October 2026, per Kyverno's own
+#     release notes). Once this cluster's Kyverno is upgraded past that
+#     point, the legacy ClusterPolicy object simply stops being evaluated
+#     - no error, no event, it just silently goes inert - and every pod
+#     on the cluster becomes schedulable onto not-yet-VLAN-attached nodes
+#     again.
+#   - policies.kyverno.io/v1 MutatingPolicy is the supported replacement:
+#     same JSON Patch mutation semantics, but expressed in CEL instead of
+#     JMESPath/patchStrategicMerge, and matched via matchConstraints
+#     instead of match/exclude blocks.
+#
+# This file is applied INSTEAD OF 09-kyverno-vlan-ready-policy.yaml on any
+# cluster where the mutatingpolicies.policies.kyverno.io CRD is available
+# (i.e. Kyverno >= ~1.16, confirmed live on this project's own clusters
+# running v1.19.0). manifests/00-Orchestration-script.sh's
+# apply_kyverno_policy() picks exactly one of the two policy TYPES,
+# deletes whichever one it did NOT pick (if present from a previous run
+# or an older Kyverno version), and never runs both at once - see that
+# function and mutating_policy_crd_available() for the dispatch logic.
+# Running both types simultaneously against the same unexcluded pod would
+# have each independently append its own toleration - harmless (Kubernetes
+# tolerates duplicate tolerations fine) but sloppy and confusing to debug,
+# confirmed live against this exact cluster while testing the sibling
+# project's own equivalent migration.
+#
+# Structural translation from the legacy policy's three JMESPath rules
+# (require-vlan-ready-node / add-vlan-toleration-new-list /
+# append-vlan-toleration-existing-list) into one CEL jsonPatch expression:
+#
+#   - nodeSelector is still a flat key:value map - the CEL below only
+#     ever adds the single "vlan-ready" key, either into an existing map
+#     or by creating the map fresh, and is a no-op if that key is already
+#     present. Exactly the same collision-safety property as the legacy
+#     patchStrategicMerge version: a second project's policy adding a
+#     different map key can never collide with this one.
+#   - tolerations is still a list, so the CEL below always APPENDS (JSON
+#     Patch op: add, path ending in /-) rather than replacing the list,
+#     and guards against re-adding its own entry with an exists() check
+#     first. Kyverno's own docs note mutations can be reinvoked if a
+#     later webhook/policy changes the object further, so the exists()
+#     guard is load-bearing, not just tidiness - confirmed live: without
+#     it, a pod mutated by two independently-installed policies (this one
+#     plus a differently-keyed sibling policy, or this policy observed
+#     mid-migration while the legacy ClusterPolicy was still also active)
+#     can otherwise pick up more than one matching toleration entry.
+#
+#   - The tolerations exists() check guards every field access with has()
+#     before comparing it - CEL throws a hard evaluation error ("no such
+#     key: key"), not a false/empty result, when a list element genuinely
+#     lacks a field the expression references. A toleration with no `key`
+#     at all (the valid, documented Kubernetes "tolerate every taint"
+#     wildcard form - operator: Exists, no key - used by this very
+#     project's own kube-system workloads per CLAUDE.md, and also what
+#     `kubectl debug node` injects automatically into its debug pod) has
+#     no `t.key` to read. Without the has() guard, ANY pod carrying such a
+#     wildcard toleration in a non-excluded namespace got its admission
+#     request rejected outright (the webhook fails closed on a CEL
+#     evaluation error) - confirmed live against this exact cluster via
+#     `kubectl debug node`, see docs/NAT-Test.md Tier 9 for the full
+#     repro. The fixed expression also treats a wildcard toleration as
+#     already satisfying "tolerates vlan-not-ready" (rather than still
+#     appending a redundant specific one), matching real Kubernetes
+#     semantics: operator Exists with no key tolerates every taint.
+#
+# spec.autogen.podControllers.controllers: [] is the CEL-era equivalent
+# of the legacy policy's `pod-policies.kyverno.io/autogen-controllers:
+# none` annotation - MutatingPolicy autogenerates extra rules targeting
+# owning controllers' pod templates (Deployment/DaemonSet/CronJob/Job) by
+# default, which is exactly the autogen bug described in the legacy
+# policy's header, just resurfaced under the new CRD. Unlike the legacy
+# annotation, this MUST be a spec field - setting it as a metadata
+# annotation is silently ignored under this CRD.
+#
+# matchConstraints.namespaceSelector replaces both the legacy policy's
+# exclude.any.resources.namespaces list AND, less obviously, the shared
+# `kyverno` ConfigMap's resourceFilters entry that this project has
+# relied on for free protection against mutating a sibling project's own
+# pods. Confirmed live: resourceFilters only governs Kyverno's legacy
+# JMESPath engine - a MutatingPolicy ignores it entirely. The
+# `kyverno-mutation-exempt` namespaceSelector clause below is what
+# actually closes that gap now: any namespace that labels itself
+# `kyverno-mutation-exempt=true` (kubectl label namespace <ns>
+# kyverno-mutation-exempt=true) is excluded from every MutatingPolicy on
+# the cluster that follows this same convention, without either project
+# ever needing to hardcode the other's namespace name. lke-e-acl-operator
+# already labels its own namespace this way as of its own migration to
+# MutatingPolicy.
+#
+# -----------------------------------------------------
+# Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+#
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
+---
+apiVersion: policies.kyverno.io/v1
+kind: MutatingPolicy
+metadata:
+  name: linode-lke-vlan-gating
+  annotations:
+    policies.kyverno.io/title: Linode LKE VLAN Gating
+    policies.kyverno.io/category: Scheduling
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >
+      Requires application pods to land only on nodes labeled
+      vlan-ready=true, and grants the toleration needed to schedule past
+      the permanent vlan-not-ready node taint. Excludes kube-system,
+      kyverno, kube-public, kube-node-lease, and any namespace labeled
+      kyverno-mutation-exempt=true - those workloads (the VLAN IP
+      initializer Job, vlan-ip-controller Deployment, and
+      vlan-ip-reconciler CronJob) carry their own explicit, permanent
+      tolerations in their manifests instead, since Kyverno intentionally
+      never touches kube-system. CEL-based MutatingPolicy replacement for
+      the deprecated kyverno.io/v1 ClusterPolicy of the same name.
+spec:
+  autogen:
+    podControllers:
+      controllers: []
+  reinvocationPolicy: Never
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kyverno
+            - kube-public
+            - kube-node-lease
+        - key: kyverno-mutation-exempt
+          operator: NotIn
+          values:
+            - "true"
+  mutations:
+    - patchType: JSONPatch
+      jsonPatch:
+        expression: |
+          (has(object.spec.nodeSelector) && "vlan-ready" in object.spec.nodeSelector ?
+            []
+          : has(object.spec.nodeSelector) ?
+            [JSONPatch{op: "add", path: "/spec/nodeSelector/" + jsonpatch.escapeKey("vlan-ready"), value: "true"}]
+          :
+            [JSONPatch{op: "add", path: "/spec/nodeSelector", value: {"vlan-ready": "true"}}]
+          ) + (
+          has(object.spec.tolerations) && object.spec.tolerations.exists(t, (has(t.key) && t.key == "vlan-not-ready") || (!has(t.key) && has(t.operator) && t.operator == "Exists")) ?
+            []
+          : has(object.spec.tolerations) && size(object.spec.tolerations) > 0 ?
+            [JSONPatch{op: "add", path: "/spec/tolerations/-", value: {"key": "vlan-not-ready", "operator": "Equal", "value": "true", "effect": "NoSchedule"}}]
+          :
+            [JSONPatch{op: "add", path: "/spec/tolerations", value: [{"key": "vlan-not-ready", "operator": "Equal", "value": "true", "effect": "NoSchedule"}]}]
+          )

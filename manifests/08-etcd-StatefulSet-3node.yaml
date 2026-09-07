@@ -1,0 +1,109 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+  namespace: kube-system
+  labels:
+    app: etcd
+spec:
+  clusterIP: None
+  selector:
+    app: etcd
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: etcd
+  namespace: kube-system
+spec:
+  serviceName: "etcd"
+  replicas: 3
+  selector:
+    matchLabels:
+      app: etcd
+  template:
+    metadata:
+      labels:
+        app: etcd
+    spec:
+      # Pin etcd to the dedicated infra pool so it never lands on a node that
+      # vlan-manager will later shut down/reconfigure for VLAN attachment.
+      # The matching taint on that pool keeps app/vlan-managed nodes from
+      # ever receiving these pods, and keeps vlan-manager (no toleration
+      # defined) from ever running on the infra pool itself.
+      nodeSelector:
+        infra-pool: "true"
+      tolerations:
+        - key: "infra-pool"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - etcd
+              topologyKey: "kubernetes.io/hostname"
+      containers:
+      - name: etcd
+        image: quay.io/coreos/etcd:v3.5.12
+        command:
+          - /usr/local/bin/etcd
+        args:
+          - --name=$(POD_NAME)
+          - --data-dir=/etcd-data
+          - --initial-advertise-peer-urls=http://$(POD_NAME).etcd.kube-system.svc.cluster.local:2380
+          - --listen-peer-urls=http://0.0.0.0:2380
+          - --listen-client-urls=http://0.0.0.0:2379
+          - --advertise-client-urls=http://$(POD_NAME).etcd.kube-system.svc.cluster.local:2379
+          - --initial-cluster=etcd-0=http://etcd-0.etcd.kube-system.svc.cluster.local:2380,etcd-1=http://etcd-1.etcd.kube-system.svc.cluster.local:2380,etcd-2=http://etcd-2.etcd.kube-system.svc.cluster.local:2380
+          - --initial-cluster-state=new
+          # Explicit rather than relying on etcd's own default (currently
+          # info as of v3.5, but implicit) - not tied to this repo's
+          # LOG_LEVEL ConfigMap key, since etcd is a vendored binary with its
+          # own --log-level values, not this project's code.
+          - --log-level=info
+          - --logger=zap
+        env:
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+
+        ports:
+          - containerPort: 2379
+          - containerPort: 2380
+        volumeMounts:
+          - name: etcd-data
+            mountPath: /etcd-data
+      restartPolicy: Always
+  volumeClaimTemplates:
+    - metadata:
+        name: etcd-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+---
+# PodDisruptionBudget: protects etcd quorum (needs 2 of 3 members up) from
+# VOLUNTARY disruptions - e.g. cluster-autoscaler scale-down, `kubectl drain`,
+# or node upgrades. This does NOT protect against involuntary loss (a node
+# crashing or being force-deleted), only against automation that is supposed
+# to check first. With this in place, cluster-autoscaler will never pick a
+# node for scale-down if evicting its etcd pod would drop live members below 2 -
+# it will simply choose a different node, or skip that scale-down cycle.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: etcd-pdb
+  namespace: kube-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: etcd

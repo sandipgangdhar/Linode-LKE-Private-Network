@@ -1,0 +1,125 @@
+# 11-vlan-ip-reconciler-cronjob.yaml
+#
+# Runs scripts/11-vlan-ip-reconciler.sh on a schedule to reconcile etcd's
+# "used VLAN IP" tracking against Linode's real, current VLAN attachments,
+# and release confirmed orphans automatically (see the safety design notes
+# at the top of the script itself before changing MIN_CONFIRM_AGE_SECONDS
+# or MAX_AUTO_RELEASE_PER_RUN).
+#
+# Gated by ENABLE_IP_RECONCILER in the vlan-manager-config ConfigMap -
+# conditionally applied by 00-Orchestration-Script.sh, same pattern as its
+# other optional add-ons.
+#
+# -----------------------------------------------------
+# Author:
+# - Sandip Gangdhar
+# - GitHub: https://github.com/sandipgangdhar
+#
+# © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vlan-ip-reconciler
+  namespace: kube-system
+spec:
+  # Every 15 minutes. MIN_CONFIRM_AGE_SECONDS (default 900s) assumes this
+  # cadence - a candidate needs to survive one full schedule interval before
+  # it's actually released. Change both together if you adjust this.
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 3600
+      backoffLimit: 0
+      template:
+        metadata:
+          name: vlan-ip-reconciler
+        spec:
+          # Tolerate ANY taint (not just vlan-not-ready) so this CronJob can
+          # still run on the app-pool once a sibling project (e.g.
+          # lke-e-acl-operator, whose docs put an acl-not-ready taint on
+          # this same shared app-pool) also has its own permanent taint
+          # there - a node needs ALL its taints tolerated to accept a pod,
+          # so a single-key toleration silently loses the ability to
+          # schedule anywhere the moment a second project's taint shows up.
+          # This runs in kube-system, excluded from the Kyverno policy that
+          # grants this same toleration to application pods, so it needs
+          # its own explicit copy here. Pool isolation is enforced via
+          # nodeAffinity below, requiring the app-pool LABEL rather than
+          # just excluding infra-pool - a cluster can have more than
+          # app-pool + infra-pool, and an unlabeled 3rd/4th pool would
+          # otherwise silently pick this CronJob up too. See
+          # 07-vlan-manager-daemonset.yaml for the full rationale, this
+          # mirrors that fix.
+          tolerations:
+            - operator: Exists
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: app-pool
+                        operator: In
+                        values:
+                          - "true"
+          serviceAccountName: vlan-manager-sa
+          restartPolicy: Never
+          containers:
+            - name: vlan-ip-reconciler
+              image: ghcr.io/sandipgangdhar/linode-lke-private-network:latest
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  mkdir -p /root/.linode-cli
+                  echo "$LINODE_CLI_CONFIG" > /root/.linode-cli/linode-cli
+                  chmod 600 /root/.linode-cli/linode-cli
+                  export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
+
+                  cp --dereference /root/scripts/11-vlan-ip-reconciler.sh /tmp/reconciler.sh
+                  chmod +x /tmp/reconciler.sh
+                  /tmp/reconciler.sh
+              env:
+                - name: REGION
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vlan-manager-config
+                      key: REGION
+                - name: SUBNET
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vlan-manager-config
+                      key: SUBNET
+                - name: LINODE_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: vlan-manager-secrets
+                      key: LINODE_API_KEY
+                - name: LINODE_CLI_CONFIG
+                  valueFrom:
+                    secretKeyRef:
+                      name: vlan-manager-secrets
+                      key: LINODE_CLI_CONFIG
+                - name: ETCD_ENDPOINTS
+                  value: "${ETCD_ENDPOINTS}"
+                - name: LOG_LEVEL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vlan-manager-config
+                      key: LOG_LEVEL
+                      optional: true
+                # Uncomment to override the safety defaults documented in
+                # scripts/11-vlan-ip-reconciler.sh:
+                # - name: MIN_CONFIRM_AGE_SECONDS
+                #   value: "900"
+                # - name: MAX_AUTO_RELEASE_PER_RUN
+                #   value: "20"
+              volumeMounts:
+                - name: vlan-manager-scripts
+                  mountPath: /root/scripts
+          volumes:
+            - name: vlan-manager-scripts
+              configMap:
+                name: vlan-manager-scripts

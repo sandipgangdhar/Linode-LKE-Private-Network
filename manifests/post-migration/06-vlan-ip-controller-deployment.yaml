@@ -1,0 +1,161 @@
+# CUSTOMER-REPO OVERLAY VARIANT -- see scripts/publish/assemble_customer_repo.py
+# and customer-repo-overlay/manifests/06-vlan-ip-controller-deployment.yaml's
+# header comment for why this exists (06-rest-api is baked directly into the
+# ghcr.io image at manifests/Dockerfile build time, never shipped as a file
+# in this repo at all -- same reasoning applies to the post-migration
+# manifest). Keep in sync by hand with the build repo's
+# manifests/post-migration/06-vlan-ip-controller-deployment.yaml for
+# everything except the `command`/`args`/`volumeMounts`/`volumes` below.
+#
+# Post-migration: vlan-ip-controller on vlan-ready app-pool nodes.
+#
+# vlan-ip-controller is now pinned to infra-pool pre-migration (see
+# ../06-vlan-ip-controller-deployment.yaml for why - a live-confirmed bug
+# where it having zero eligible nodes during a multi-node VLAN/VPC attach
+# cycle caused a ReplicaSet pod-creation storm), matching etcd/
+# vlan-config-controller/CoreDNS's existing protection. This file is what
+# moves it onto app-pool once migration is safe - post-migration-
+# consolidate.sh's Step 3 applies this.
+#
+# Apply via post-migration-consolidate.sh (uses envsubst for ETCD_ENDPOINTS).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vlan-ip-controller
+  namespace: kube-system
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vlan-ip-controller
+  template:
+    metadata:
+      labels:
+        app: vlan-ip-controller
+    spec:
+      # Requires vlan-ready=true, NOT just app-pool=true - deliberately the
+      # same distinction etcd/vlan-config-controller's post-migration
+      # manifests make (see post-migration/10-vlan-config-controller.yaml).
+      # A plain app-pool=true would let this land on a brand-new app-pool
+      # node the moment it joins (e.g. an autoscaler scale-up) - before that
+      # node has been through its own VLAN/VPC attach cycle, which is
+      # exactly the zero-eligible-nodes race this Deployment's infra-pool
+      # pinning exists to avoid in the first place (see the pre-migration
+      # manifest's comment). vlan-ready=true guarantees the node it lands on
+      # is already done attaching, not about to reboot out from under it.
+      #
+      # Tolerate ANY taint (not just vlan-not-ready) so it can still run on
+      # the app-pool once a sibling project (e.g. lke-e-acl-operator, whose
+      # docs put an acl-not-ready taint on this same shared app-pool) also
+      # has its own permanent taint there - a node needs ALL its taints
+      # tolerated to accept a pod. This is a kube-system workload,
+      # deliberately excluded from Kyverno's linode-lke-vlan-gating policy,
+      # so it needs its own explicit toleration rather than relying on
+      # injection.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: vlan-ready
+                    operator: In
+                    values:
+                      - "true"
+      tolerations:
+        - operator: Exists
+      serviceAccountName: vlan-manager-sa
+      containers:
+        - name: vlan-ip-controller
+          image: ghcr.io/sandipgangdhar/linode-lke-private-network:latest
+          resources:
+            requests:
+              memory: "1000Mi"
+              cpu: "500m"
+            limits:
+              memory: "1500Mi"
+              cpu: "1000m"
+          # 06-rest-api is baked directly into the image at
+          # /usr/local/bin/06-rest-api (manifests/Dockerfile), no copy-out-
+          # of-ConfigMap step needed.
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              # Unredirected on purpose - see the same comment in
+              # ../06-vlan-ip-controller-deployment.yaml for why.
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] Launching 06-rest-api..."
+              exec /usr/local/bin/06-rest-api
+          env:
+            - name: LINODE_CLI_CONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: vlan-manager-secrets
+                  key: LINODE_CLI_CONFIG
+            - name: LINODE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vlan-manager-secrets
+                  key: LINODE_API_KEY
+            - name: REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: REGION
+            - name: SUBNET
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: SUBNET
+            - name: CACHE_TTL_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: CACHE_TTL_SECONDS
+            - name: ETCD_ENDPOINTS
+              value: "${ETCD_ENDPOINTS}"
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: LOG_LEVEL
+                  optional: true
+          # No vlan-manager-scripts mount here -- 06-rest-api is baked into
+          # the image, not copied out of that ConfigMap.
+          volumeMounts:
+            - name: linode-cli-config
+              mountPath: /root/.linode-cli/
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 30
+      volumes:
+        - name: linode-cli-config
+          secret:
+            secretName: vlan-manager-secrets
+            items:
+              - key: LINODE_CLI_CONFIG
+                path: linode-cli
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vlan-ip-controller-service
+  namespace: kube-system
+spec:
+  selector:
+    app: vlan-ip-controller
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

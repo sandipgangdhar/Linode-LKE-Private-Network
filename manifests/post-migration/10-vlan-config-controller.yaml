@@ -1,0 +1,151 @@
+# manifests/post-migration/10-vlan-config-controller.yaml
+#
+# Post-cutover copy of 10-vlan-config-controller.yaml: identical workload,
+# but scheduling is switched from the dedicated infra-pool
+# (nodeSelector/toleration) to a REQUIRED nodeAffinity on vlan-ready=true.
+# See 08-etcd-StatefulSet-3node.yaml in this folder for the full rationale
+# and the precondition (only apply via ../post-migration-consolidate.sh,
+# after every app-pool node is already vlan-ready=true).
+#
+# Note: an earlier version of this file included a watchdog CronJob that
+# exec'd into the controller pod every 2 minutes and deleted it if
+# unreachable. That's dropped here to keep behavior identical to the
+# primary (infra-pool) deployment, which has no watchdog either - the
+# etcd-lease-based leader election + PDB already handle crash failover.
+# Re-add a watchdog separately if you want that extra layer.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vlan-config-controller
+  namespace: kube-system
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: vlan-config-controller
+
+  template:
+    metadata:
+      labels:
+        app: vlan-config-controller
+
+    spec:
+      serviceAccountName: vlan-manager-sa
+
+      # App-pool nodes carry a PERMANENT "vlan-not-ready" taint - a
+      # toleration is required or this can never schedule here regardless
+      # of nodeAffinity. Kyverno's linode-lke-vlan-gating policy would
+      # normally grant this automatically, but it deliberately excludes
+      # kube-system, so this kube-system workload needs its own explicit
+      # copy - see the same comment in
+      # post-migration/08-etcd-StatefulSet-3node.yaml for the full
+      # rationale. Tolerate ANY taint (not just vlan-not-ready) for the
+      # same reason as that file: a node needs ALL its taints tolerated to
+      # accept a pod, and a single-key toleration silently breaks the
+      # moment a sibling project (e.g. lke-e-acl-operator) also places its
+      # own permanent taint on this same shared app-pool. The required
+      # nodeAffinity below remains the real isolation mechanism.
+      #
+      # Required nodeAffinity keeps this off any node that hasn't finished
+      # VLAN attach yet; anti-affinity keeps the 2 replicas apart. The
+      # infra-pool NotIn clause is defense-in-depth - see the same comment
+      # in post-migration/08-etcd-StatefulSet-3node.yaml.
+      tolerations:
+        - operator: Exists
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: vlan-ready
+                    operator: In
+                    values:
+                      - "true"
+                  - key: infra-pool
+                    operator: NotIn
+                    values:
+                      - "true"
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - vlan-config-controller
+              topologyKey: "kubernetes.io/hostname"
+
+      containers:
+        - name: vlan-config-controller
+          image: ghcr.io/sandipgangdhar/linode-lke-private-network:latest
+
+          securityContext:
+            privileged: false
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Starting VLAN Config Controller..."
+
+              # Configure Linode CLI
+              mkdir -p /root/.linode-cli
+              echo "$LINODE_CLI_CONFIG" > /root/.linode-cli/linode-cli
+              chmod 600 /root/.linode-cli/linode-cli
+              export LINODE_CLI_CONFIG="/root/.linode-cli/linode-cli"
+
+              # Copy controller script
+              cp --dereference /root/scripts/07-vlan-config-controller-scripts.sh /tmp/controller.sh
+              chmod +x /tmp/controller.sh
+
+              # Start controller loop
+              /tmp/controller.sh
+
+          env:
+            - name: LINODE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vlan-manager-secrets
+                  key: LINODE_API_KEY
+
+            - name: LINODE_CLI_CONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: vlan-manager-secrets
+                  key: LINODE_CLI_CONFIG
+
+            - name: ETCD_ENDPOINTS
+              value: "${ETCD_ENDPOINTS}"
+
+            - name: MAX_CONCURRENT_JOBS
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: MAX_CONCURRENT_JOBS
+
+            - name: JOB_WAIT_TIMEOUT_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: JOB_WAIT_TIMEOUT_SECONDS
+
+          volumeMounts:
+            - name: vlan-manager-scripts
+              mountPath: /root/scripts
+
+      volumes:
+        - name: vlan-manager-scripts
+          configMap:
+            name: vlan-manager-scripts
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vlan-config-controller-pdb
+  namespace: kube-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: vlan-config-controller
