@@ -47,6 +47,9 @@
 #                                      whole NAT fleet, instead of one static NAT gateway instance.
 # 28. NAT_FLEET_ROSTER_URL            - Required if ENABLE_NAT_FLEET="true". The fleet's roster
 #                                      endpoint, e.g. http://<natctl-host-VLAN-IP>:8099/fleet/<pool>.
+#                                      Comma-separate EVERY pool node's URL for natctl-on-node pools
+#                                      - a single URL is a soft SPOF for a freshly-starting client
+#                                      (confirmed live, 2026-09-07). See the key's own comment below.
 # 29. NAT_FLEET_FALLBACK_PROBE_ENABLED  - Optional, default unset/false. Opt-in belt-and-suspenders
 #                                      direct health probing on top of trusting the roster's own
 #                                      "healthy" field. Leave unset unless you have a specific
@@ -70,6 +73,17 @@
 #
 # VLAN IP Controller:
 # 13. CACHE_TTL_SECONDS  - How long vlan-ip-controller caches its Linode VLAN-IP scan.
+# 32. VLAN_CIDR          - Optional. The VLAN's real, full physical CIDR, distinct from SUBNET
+#                          (which stays purely an allocation pool - see SUBNET's own comment
+#                          below). Only needed when SUBNET is deliberately narrower than the
+#                          VLAN's actual extent (e.g. to avoid another party's reserved
+#                          sub-block on the same VLAN) - unset means "SUBNET's own prefix IS
+#                          the real prefix", the historical/default behavior. When set, every
+#                          node's VLAN interface is configured with VLAN_CIDR's prefix instead
+#                          of SUBNET's, so the interface's kernel-connected route actually
+#                          covers the whole VLAN rather than just the narrower pool. SUBNET
+#                          must nest inside VLAN_CIDR - vlan-ip-controller rejects allocation
+#                          requests otherwise.
 #
 # Logging (applies to all six components - vlan-manager, vlan-ip-controller,
 # vlan-ip-initializer, vlan-config-controller, vlan-ip-reconciler; etcd has
@@ -229,6 +243,23 @@ data:
   # Required only if ENABLE_NAT_FLEET is "true". The fleet's roster endpoint
   # - reachable over the same VLAN this node already attaches to. Example:
   # http://10.60.32.20:8099/fleet/shared
+  #
+  # LIST EVERY POOL NODE, comma-separated, if the pool runs in
+  # natctl-on-node mode (every node in the pool runs its own natctl and
+  # serves the identical roster - check which mode your target pool
+  # actually uses before assuming). A single URL is a soft single point
+  # of failure: client-agent tries each listed URL in turn (starting from
+  # whichever last succeeded) and only fails if every one is down. This
+  # matters most for a freshly-starting/restarting client (e.g. this
+  # DaemonSet pod rescheduling), which has no prior roster state to fall
+  # back on - one dead node in a single-URL config means zero NAT routes
+  # configured, silently, until that node recovers. Confirmed live,
+  # 2026-09-07: a node in the dedicated-trio pool (192.168.140.21) was
+  # powered off during a routine test, and a single-URL config here would
+  # have (and, in the sibling linode-nat-gateway project's own real
+  # incident on 2026-09-03, did) leave the client with no NAT egress at
+  # all. Example, all three dedicated-trio nodes:
+  # http://192.168.140.20:8099/fleet/dedicated-trio,http://192.168.140.21:8099/fleet/dedicated-trio,http://192.168.140.22:8099/fleet/dedicated-trio
   NAT_FLEET_ROSTER_URL: ""
 
   # Optional advanced knobs - map directly onto client-agent's own env vars
@@ -290,6 +321,16 @@ data:
   # Primary subnet for VLAN IP allocation (Linode side).
   # This is the pool from which /03-script-ip-allocate.sh picks addresses.
   SUBNET: "10.95.255.0/24"
+
+  # Optional. Set this ONLY if SUBNET above is deliberately narrower than the VLAN's
+  # real, full physical CIDR (e.g. scoped to avoid another party's reserved sub-block
+  # on the same VLAN). Every node's VLAN interface then gets configured with THIS
+  # prefix instead of SUBNET's own - otherwise a node's kernel-connected route only
+  # covers SUBNET's narrower range and can't reach other hosts elsewhere on the same
+  # physical VLAN (a NAT gateway, a NAT fleet node, another party's instance) even
+  # though they're on the same wire. Leave unset/commented to keep the historical
+  # behavior (SUBNET's own prefix is used as-is). SUBNET must nest inside this CIDR.
+  # VLAN_CIDR: "10.95.0.0/16"
 
   # Linode Region Name
   REGION: "gb-lon"

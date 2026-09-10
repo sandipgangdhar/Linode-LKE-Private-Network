@@ -60,8 +60,23 @@ RUN curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/sta
 # REST API's two-step asset flow below is the actually-correct path:
 # resolve the release by tag to get the numeric asset id, then fetch that
 # specific asset id with Accept: application/octet-stream.
+# Bumped v0.1.10 -> v0.1.40 (2026-09-10): confirmed live that v0.1.10 (cut
+# 2026-09-02) predates the multi-URL NATCTL_ROSTER_URL fix HANDOVER.md
+# section 11 describes landing 2026-09-07 - a comma-separated roster URL
+# list (this repo's own documented HA pattern for natctl-on-node pools,
+# see 00-vlan-manager-configmap.example.template.yaml's NAT_FLEET_ROSTER_URL
+# comment) silently 404'd on every fetch with the old binary. A plain curl
+# to the exact same URLs from the same pod succeeded every time, and
+# client-agent's own retry loop never once succeeded across a full minute
+# of 5s retries - ruling out timing/reachability and pointing straight at
+# the binary not actually splitting the list (almost certainly treating
+# the whole comma-joined string as one URL, hitting the first host with a
+# garbled path). No sibling-project coordination to rely on here (per
+# HANDOVER.md's own note, that team dropped this integration from their
+# roadmap) - re-check the pinned version against this class of gap
+# whenever NAT Fleet integration issues don't have an obvious cause.
 ARG CLIENT_AGENT_REPO=sandipgangdhar/linode-nat-gateway
-ARG CLIENT_AGENT_VERSION=v0.1.10
+ARG CLIENT_AGENT_VERSION=v0.1.40
 
 RUN --mount=type=secret,id=github_token,required=true \
     set -eu && \

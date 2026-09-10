@@ -161,6 +161,12 @@ spec:
                 configMapKeyRef:
                   name: vlan-manager-config
                   key: SUBNET
+            - name: VLAN_CIDR
+              valueFrom:
+                configMapKeyRef:
+                  name: vlan-manager-config
+                  key: VLAN_CIDR
+                  optional: true
             - name: CACHE_TTL_SECONDS
               valueFrom:
                 configMapKeyRef:
