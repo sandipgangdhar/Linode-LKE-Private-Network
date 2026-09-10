@@ -1,12 +1,3 @@
-# CUSTOMER-REPO OVERLAY VARIANT -- see scripts/publish/assemble_customer_repo.py
-# and customer-repo-overlay/manifests/06-vlan-ip-controller-deployment.yaml's
-# header comment for why this exists (06-rest-api is baked directly into the
-# ghcr.io image at manifests/Dockerfile build time, never shipped as a file
-# in this repo at all -- same reasoning applies to the post-migration
-# manifest). Keep in sync by hand with the build repo's
-# manifests/post-migration/06-vlan-ip-controller-deployment.yaml for
-# everything except the `command`/`args`/`volumeMounts`/`volumes` below.
-#
 # Post-migration: vlan-ip-controller on vlan-ready app-pool nodes.
 #
 # vlan-ip-controller is now pinned to infra-pool pre-migration (see
@@ -75,16 +66,16 @@ spec:
             limits:
               memory: "1500Mi"
               cpu: "1000m"
-          # 06-rest-api is baked directly into the image at
-          # /usr/local/bin/06-rest-api (manifests/Dockerfile), no copy-out-
-          # of-ConfigMap step needed.
           command: ["/bin/bash", "-c"]
           args:
             - |
+              cp --dereference /root/scripts/06-rest-api.py /tmp/06-rest-api.py && \
+              chmod u+x /tmp/06-rest-api.py && \
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] Copy of 06-rest-api.py from /root/scripts/ to /tmp completed."
               # Unredirected on purpose - see the same comment in
               # ../06-vlan-ip-controller-deployment.yaml for why.
-              echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] Launching 06-rest-api..."
-              exec /usr/local/bin/06-rest-api
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] Launching 06-rest-api.py..."
+              exec python3 /tmp/06-rest-api.py
           env:
             - name: LINODE_CLI_CONFIG
               valueFrom:
@@ -125,9 +116,9 @@ spec:
                   name: vlan-manager-config
                   key: LOG_LEVEL
                   optional: true
-          # No vlan-manager-scripts mount here -- 06-rest-api is baked into
-          # the image, not copied out of that ConfigMap.
           volumeMounts:
+            - name: vlan-manager-scripts
+              mountPath: /root/scripts
             - name: linode-cli-config
               mountPath: /root/.linode-cli/
           livenessProbe:
@@ -145,6 +136,9 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 30
       volumes:
+        - name: vlan-manager-scripts
+          configMap:
+            name: vlan-manager-scripts
         - name: linode-cli-config
           secret:
             secretName: vlan-manager-secrets

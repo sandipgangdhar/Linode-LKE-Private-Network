@@ -38,15 +38,14 @@ RUN curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/sta
 # into this image's layer history (`docker history` would show it
 # forever, a real leak even if the layer is later removed). Supplied
 # ONLY via a BuildKit --secret mount, scoped to just this one RUN layer,
-# never written to any layer or printed. Every `docker build` of this
-# image now requires (run from the REPO ROOT, not manifests/ - the build
-# context now has to include scripts/06-rest-api.py for the Nuitka-compile
-# stage further down this file, which manifests/ alone doesn't contain):
+# never written to any layer or printed. Build from manifests/ (this
+# Dockerfile has no COPY of anything outside this directory):
 #
+#   cd manifests
 #   DOCKER_BUILDKIT=1 docker build \
-#     --secret id=github_token,src=manifests/.github-client-agent-token \
+#     --secret id=github_token,src=.github-client-agent-token \
 #     -t ghcr.io/sandipgangdhar/linode-lke-private-network:latest \
-#     -f manifests/Dockerfile .
+#     .
 #
 # manifests/.github-client-agent-token is a gitignored, local-only file
 # holding a fine-grained GitHub PAT scoped to ONLY this one repo with
@@ -97,45 +96,5 @@ RUN --mount=type=secret,id=github_token,required=true \
       "https://api.github.com/repos/${CLIENT_AGENT_REPO}/releases/assets/${ASSET_ID}" && \
     [ "$(stat -c%s /usr/local/bin/client-agent)" -gt 1000000 ] && \
     chmod +x /usr/local/bin/client-agent
-
-# === Compile scripts/06-rest-api.py via Nuitka, baked directly into this image ===
-#
-# NOT delivered via the vlan-manager-scripts ConfigMap the way scripts/*.sh
-# are, and NOT compiled by the customer-repo publish pipeline the way
-# scripts/*.sh are (see scripts/publish/shc_compile.sh) - both found live to
-# be structurally impossible for this one file. A Kubernetes ConfigMap is
-# hard-capped around 1-3MB regardless of etcd flags (confirmed live:
-# `kubectl create cm ...` failed outright with "Request entity too large:
-# limit is 3145728"), and a *standalone* Nuitka build (bundling a full
-# self-contained Python runtime + every dependency - the only viable option
-# when compiling on an unrelated CI runner for the customer-repo pipeline,
-# which has no guarantee its environment matches whatever ships in this
-# image) came out around 146MB - nowhere close to fitting either mechanism.
-#
-# Compiled HERE instead, in plain (non-standalone) Nuitka mode: this RUN
-# layer runs inside the exact same Python environment/site-packages this
-# binary will execute against at runtime (the `pip install` two layers
-# above, in this same image) - no bundling needed at all, since the
-# environment is guaranteed identical, not just "close enough." Produces a
-# small, genuinely native-compiled binary. scripts/06-rest-api.py itself
-# never ships to the customer repo at all as a result - not as plaintext,
-# not as a compiled artifact - see assemble_customer_repo.py's own explicit
-# removal of it from the assembled tree.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc patchelf ccache && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
-RUN pip install --no-cache-dir nuitka
-
-COPY scripts/06-rest-api.py /tmp/06-rest-api.py
-RUN python3 -m nuitka \
-      --output-dir=/tmp/nuitka-build \
-      --output-filename=06-rest-api \
-      --remove-output \
-      --assume-yes-for-downloads \
-      /tmp/06-rest-api.py && \
-    mv /tmp/nuitka-build/06-rest-api /usr/local/bin/06-rest-api && \
-    chmod +x /usr/local/bin/06-rest-api && \
-    rm -rf /tmp/06-rest-api.py /tmp/nuitka-build
 
 CMD ["bash"]

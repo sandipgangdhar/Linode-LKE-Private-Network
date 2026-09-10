@@ -1,57 +1,38 @@
 # 06-vlan-ip-controller-deployment.yaml
-#
-# CUSTOMER-REPO OVERLAY VARIANT -- see scripts/publish/assemble_customer_repo.py.
-# This file OVERWRITES the build repo's manifests/06-vlan-ip-controller-deployment.yaml
-# in the published customer repo. It exists because 06-rest-api.py is compiled
-# directly into the shared ghcr.io image at manifests/Dockerfile build time
-# (never shipped as a file in this repo at all, plaintext or compiled -- see
-# that file's own header comment: a Kubernetes ConfigMap is hard-capped
-# around 1-3MB, and a standalone Nuitka build of this file came out around
-# 146MB, nowhere close to fitting), so this container just execs the
-# already-baked-in /usr/local/bin/06-rest-api directly -- no copy-out-of-a-
-# ConfigMap-mount step at all, unlike every other scripts/*.sh reference
-# (those ship as plain text at the same filename and are delivered via the
-# vlan-manager-scripts ConfigMap as usual, so none of them need an
-# overlay). This also means this container no longer needs the
-# vlan-manager-scripts ConfigMap mounted at all. Keep this file's
-# `command`/`args`/`volumeMounts`/`volumes` in sync by hand whenever the
-# build repo's own 06-vlan-ip-controller-deployment.yaml changes anything
-# OTHER than those (env vars, resources, probes, nodeSelector, etc.) --
-# everything below this comment is otherwise a straight copy.
-#
+# 
 # This YAML file defines the Deployment and Service for the VLAN Leader Manager
-# in Linode LKE. It sets up a Flask-based REST API (compiled to a standalone
-# binary in this repo) to manage VLAN IP allocations and releases. The API is
-# exposed as a ClusterIP service.
-#
+# in Linode LKE. It sets up a Flask-based REST API (`06-rest-api.py`) to manage
+# VLAN IP allocations and releases. The API is exposed as a ClusterIP service.
+# 
 # -----------------------------------------------------
 # Parameters:
-#
+# 
 # 1. replicas              - The number of pod replicas to deploy.
 # 2. serviceAccountName    - The ServiceAccount with RBAC permissions.
 # 3. image                 - Docker image used to run the Flask app.
 # 4. command & args        - Shell commands to initialize Flask and scripts.
 # 5. volumeMounts          - Mount paths for scripts and VLAN IP storage.
 # 6. ports                 - Port exposure configuration for the service.
-#
+# 
 # -----------------------------------------------------
 # Usage:
-#
+# 
 # - This Deployment initializes the Flask API, mounts necessary scripts, and
 #   connects to the VLAN IP storage for dynamic IP management.
 # - The API is exposed using a Kubernetes `Service` of type `ClusterIP`.
-#
+# 
 # -----------------------------------------------------
 # Best Practices:
-#
+# 
+# - Ensure the `vlan-manager-scripts` and `vlan-ip-pvc` are correctly configured.
 # - Use liveness and readiness probes for better health checks.
 # - Avoid hardcoded IPs; use environment variables or ConfigMaps.
-#
+# 
 # -----------------------------------------------------
 # Author:
 # - Sandip Gangdhar
 # - GitHub: https://github.com/sandipgangdhar
-#
+# 
 # © Linode-LKE-Private-Network | Developed by Sandip Gangdhar | 2025
 ---
 apiVersion: apps/v1
@@ -125,19 +106,28 @@ spec:
               memory: "1500Mi"
               cpu: "1000m"
 
-          # Command to run the Flask API -- 06-rest-api is baked directly
-          # into the image at /usr/local/bin/06-rest-api (manifests/
-          # Dockerfile), no copy-out-of-ConfigMap step needed.
+          # Command to run the Flask API
           command: ["/bin/bash", "-c"]
-          args:
+          args: 
             - |
+              # Copy the script and prepare it for execution
+              cp --dereference /root/scripts/06-rest-api.py /tmp/06-rest-api.py && \
+              chmod u+x /tmp/06-rest-api.py && \
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] Copy of 06-rest-api.py from /root/scripts/ to /tmp completed."
+
               # Start the Flask application. Runs unredirected (stdout/stderr
               # go straight to the container's own streams) so `kubectl logs`
-              # actually shows what's happening. The app's own structured
+              # actually shows what's happening - this used to be redirected
+              # to /tmp/flask.log inside the container, which made every
+              # crash/error invisible to `kubectl logs` and required
+              # `kubectl exec ... cat /tmp/flask.log` while the pod was still
+              # alive to see anything at all. The app's own structured
               # allocation log still separately writes to
-              # /tmp/allocate-ip.log - that's unaffected by this change.
-              echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] Launching 06-rest-api..."
-              exec /usr/local/bin/06-rest-api
+              # /tmp/allocate-ip.log (see LOG_FILE in 06-rest-api.py) -
+              # that's unaffected by this change.
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] Launching 06-rest-api.py..."
+              #sleep infinity
+              exec python3 /tmp/06-rest-api.py
 
           # Environment variables
           env:
@@ -187,10 +177,10 @@ spec:
                   key: LOG_LEVEL
                   optional: true
 
-          # No vlan-manager-scripts mount here -- 06-rest-api is baked into
-          # the image, not copied out of that ConfigMap (see the header
-          # comment above).
+          # Mounting necessary scripts and VLAN IP storage
           volumeMounts:
+            - name: vlan-manager-scripts
+              mountPath: /root/scripts
             - name: linode-cli-config
               mountPath: /root/.linode-cli/
 
@@ -213,6 +203,9 @@ spec:
 
       # Define the volumes to be mounted
       volumes:
+        - name: vlan-manager-scripts
+          configMap:
+            name: vlan-manager-scripts
         - name: linode-cli-config
           secret:
             secretName: vlan-manager-secrets
